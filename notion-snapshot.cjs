@@ -233,6 +233,7 @@ async function extractPageText(api2, blockId, sleep2, opts = {}) {
       const res = await api2("GET", `/blocks/${id}/children?page_size=100${cursor ? `&start_cursor=${cursor}` : ""}`);
       for (const block of res.results || []) {
         if (count >= maxBlocks) break;
+        if (opts.skip?.(block.id)) continue;
         const t = block.type;
         if (TEXT_BLOCKS.has(t)) {
           const rich = block[t]?.rich_text || [];
@@ -268,6 +269,14 @@ function arg(name) {
 function log(msg) {
   process.stderr.write(`[notion-snapshot] ${msg}
 `);
+}
+var normId = (s) => String(s).toLowerCase().replace(/-/g, "");
+function idSet(file, label) {
+  if (!file) return null;
+  const raw = JSON.parse(fs2.readFileSync(file, "utf-8"));
+  const ids = Array.isArray(raw) ? raw : raw.ids || [];
+  log(`curation: ${label} list loaded (${ids.length} root ids)`);
+  return new Set(ids.map(normId));
 }
 var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function api(method, endpoint, body) {
@@ -343,8 +352,16 @@ async function main() {
   const snapDir = path2.join(outRoot, "snapshots", `notion-${slug}-${stamp}`);
   fs2.mkdirSync(snapDir, { recursive: true });
   const errors = {};
+  const excludeIds = idSet(arg("exclude"), "exclude");
+  const includeIds = idSet(arg("include"), "include");
+  const keepRoot = (id) => {
+    const n = normId(id);
+    if (excludeIds?.has(n)) return false;
+    if (includeIds && !includeIds.has(n)) return false;
+    return true;
+  };
   log("Sweeping databases...");
-  const dbStubs = await paginateSearch("database", DB_CAP);
+  const dbStubs = (await paginateSearch("database", DB_CAP)).filter((s) => keepRoot(s.id));
   const databases = [];
   for (const stub of dbStubs) {
     try {
@@ -356,8 +373,11 @@ async function main() {
   }
   log(`  ${databases.length} databases (${dbStubs.length} found)`);
   log("Sweeping top-level pages...");
-  const pages = (await paginateSearch("page", PAGE_CAP * 3)).filter((p) => p.parent?.type === "workspace").slice(0, PAGE_CAP);
+  const pages = (await paginateSearch("page", PAGE_CAP * 3)).filter((p) => p.parent?.type === "workspace").filter((p) => keepRoot(p.id)).slice(0, PAGE_CAP);
   log(`  ${pages.length} workspace-level pages`);
+  if (excludeIds || includeIds) {
+    log(`curation: root cut active \u2014 ${databases.length} databases, ${pages.length} pages survive`);
+  }
   log("Sweeping users...");
   let users = [];
   try {
@@ -401,10 +421,11 @@ async function main() {
       if (rollupRel) g.edge(`property_${pid}`, `property_${dbId}_${rollupRel}`, "relatedTo");
     }
   }
+  const dropId = (id) => excludeIds?.has(normId(id)) ?? false;
   for (const db of databases) {
     if (!CONTENT) break;
     try {
-      const rows = await extractRecords(api, db.id, RECORD_CAP, sleep);
+      const rows = (await extractRecords(api, db.id, RECORD_CAP, sleep)).filter((r) => !dropId(r.id));
       log(`  records: ${rows.length} in "${plainTitle(db.title)}"`);
       for (const r of rows) {
         const body = Object.entries(r.values).map(([k, v]) => `${k}: ${v}`).join(" | ");
@@ -424,7 +445,7 @@ async function main() {
     const meta = { notionId: p.id, url: p.url, archived: p.archived };
     if (CONTENT) {
       try {
-        const text = await extractPageText(api, p.id, sleep);
+        const text = await extractPageText(api, p.id, sleep, { skip: dropId });
         if (text) meta.content = text;
       } catch (e) {
         errors[`page-content:${p.id}`] = String(e?.message).slice(0, 150);
@@ -447,6 +468,7 @@ async function main() {
     workspace: wsName,
     slug,
     counts: { databases: databases.length, pages: pages.length, users: users.length },
+    curation: excludeIds || includeIds ? { excluded: excludeIds ? excludeIds.size : 0, includeOnly: includeIds ? includeIds.size : 0 } : null,
     statements: g.counts.statements,
     errors
   }, null, 2));

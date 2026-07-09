@@ -5494,21 +5494,21 @@ var StdioServerTransport = class {
   }
 };
 
-// src/graph-mcp/server.ts
+// src/caddy-mcp/server.ts
 var fs4 = __toESM(require("fs"));
 var path4 = __toESM(require("path"));
 
-// src/graph-mcp/notion-gen.ts
+// src/caddy-mcp/notion-gen.ts
 var import_child_process = require("child_process");
 var http = __toESM(require("http"));
 var fs3 = __toESM(require("fs"));
 
-// src/graph-mcp/remote.ts
+// src/caddy-mcp/remote.ts
 var fs2 = __toESM(require("fs"));
 var os2 = __toESM(require("os"));
 var path2 = __toESM(require("path"));
 
-// src/graph-mcp/device.ts
+// src/caddy-mcp/device.ts
 var fs = __toESM(require("fs"));
 var os = __toESM(require("os"));
 var path = __toESM(require("path"));
@@ -5613,7 +5613,7 @@ async function graphAuthStatus() {
   }
 }
 
-// src/graph-mcp/remote.ts
+// src/caddy-mcp/remote.ts
 var REMEMBERED_G = "http://ops-sys.local/graph#remembered";
 function migrateInlineRememberedFacts(graphFile) {
   if (!fs2.existsSync(graphFile)) return 0;
@@ -5634,7 +5634,7 @@ function cacheDir() {
   if (env) return env.split(path2.delimiter).filter(Boolean)[0];
   return path2.join(os2.homedir(), ".caddy", "graphs");
 }
-async function remotePull(force = false, org) {
+async function remotePull(force = false, org, kind) {
   const creds = loadCredentials();
   if (!creds) {
     return { status: "auth_required", hint: "Not connected to the portal. Run graph_login." };
@@ -5650,6 +5650,25 @@ async function remotePull(force = false, org) {
   }
   const headers = { Authorization: `Bearer ${token}`, Accept: "application/json" };
   const dir = cacheDir();
+  if (kind && kind !== "company") {
+    const kindResponse = await fetch(`${creds.url}/api/orgs/${slug}/graphs/${kind}`, { headers });
+    if (kindResponse.status === 403) {
+      return { status: "not_shared", org: slug, kind, hint: "This source graph has not been shared with your seat." };
+    }
+    if (kindResponse.status === 401) {
+      return { status: "auth_required", org: slug, hint: "Credentials revoked or expired. Run graph_login again." };
+    }
+    if (kindResponse.status === 404) {
+      return { status: "not_found", org: slug, kind };
+    }
+    if (!kindResponse.ok) throw new Error(`portal /graphs/${kind} returned ${kindResponse.status}`);
+    const kindBody = Buffer.from(await kindResponse.arrayBuffer());
+    fs2.mkdirSync(dir, { recursive: true });
+    const kindFile = path2.join(dir, `remote-${slug}-${kind}.nq`);
+    fs2.writeFileSync(kindFile + ".tmp", kindBody);
+    fs2.renameSync(kindFile + ".tmp", kindFile);
+    return { status: "pulled", org: slug, kind, bytes: kindBody.length, file: kindFile, semver: kindResponse.headers.get("x-graph-semver") };
+  }
   const graphFile = path2.join(dir, `remote-${slug}.nq`);
   const metaFile = path2.join(dir, `remote-${slug}.meta.json`);
   const overlayFile = path2.join(dir, `remote-${slug}.local.nq`);
@@ -5726,7 +5745,7 @@ async function remotePullAll() {
   return results;
 }
 
-// src/graph-mcp/notion-gen.ts
+// src/caddy-mcp/notion-gen.ts
 var path3 = __toESM(require("path"));
 var NOTION_BUNDLE = path3.join(__dirname, "notion-snapshot.cjs");
 var PORT = parseInt(process.env.NOTION_OAUTH_PORT || "8735", 10);
@@ -5874,7 +5893,7 @@ function generateNotionStatus(a) {
   return { status: "running", last_line: last.replace(/.*\] /, "") };
 }
 
-// src/graph-mcp/server.ts
+// src/caddy-mcp/server.ts
 var NS = process.env.OPS_NS || "http://ops-sys.local/ontology#";
 var CODE_NS = process.env.CODE_NS || "http://ops-sys.local/code#";
 var RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
@@ -6325,7 +6344,7 @@ var TOOLS = [
   { name: "graph_remember", description: `Add new knowledge to a graph so it appreciates over time. Creates a Note (or a typed entity when type+name are given) carrying the fact, with provenance (addedAt/addedBy) and optional links to existing entities. Resolve "about"/"links" targets with graph_search first \u2014 never invent ids. Confirm with the user before consequential writes. Writes land in the graph's local overlay (<graph>.local.nq) \u2014 the source artifact is never modified, so pulled/regenerated graphs keep every remembered fact across refreshes. Backed up (.bak) on every write.`, inputSchema: { type: "object", properties: { ...GRAPH_ARG, fact: { type: "string", description: "The knowledge to store, in plain language" }, about: { type: "string", description: "Existing entity this fact is about (id/name \u2014 resolved against the graph)" }, type: { type: "string", description: "With name: create a typed entity (e.g. Client, Process, Decision) instead of a Note" }, name: { type: "string", description: "Label for the new entity" }, links: { type: "array", items: { type: "string" }, description: "Existing entities to relate this to (relatesTo edges)" }, source: { type: "string", description: "Attribution, default cowork-remember" } }, required: ["fact"] } },
   { name: "graph_update", description: 'Update a property on an existing entity. mode "replace" (default) writes an OVERRIDE into the local overlay: the new value masks every source value of that predicate and keeps winning across graph refreshes until mode "restore" clears it. mode "append" adds another value alongside. mode "restore" removes the override so the source values reappear. The source artifact is never rewritten. Literal values only \u2014 use graph_link for relationships. Resolve the node with graph_search first. Confirm with the user before consequential writes.', inputSchema: { type: "object", properties: { ...GRAPH_ARG, node: { type: "string", description: "Entity id, slug, IRI, or name" }, predicate: { type: "string", description: "Property local name (e.g. description, status, noteText) or full IRI" }, value: { type: "string", description: "Required except for mode restore" }, mode: { type: "string", enum: ["replace", "append", "restore"] } }, required: ["node", "predicate"] } },
   { name: "graph_link", description: "Add a relationship edge between two EXISTING entities (e.g. client \u2192 ownedBy \u2192 person). Both ends must already resolve in the graph; duplicates are refused. Confirm with the user before consequential writes.", inputSchema: { type: "object", properties: { ...GRAPH_ARG, from: { type: "string" }, rel: { type: "string", description: "Relationship local name (e.g. ownedBy, relatesTo, affects) or full IRI" }, to: { type: "string" } }, required: ["from", "rel", "to"] } },
-  { name: "graph_pull", description: "Sync an org graph from the connected graph-portal (remote mode). Version-checked: downloads only when the portal has a newer version than the local cache. Auth comes from the device-login store (run graph_login once per machine); returns auth_required when not connected or credentials were revoked. Run at session start or when the graph feels stale.", inputSchema: { type: "object", properties: { force: { type: "boolean", description: "Re-download even when versions match" }, org: { type: "string", description: "Org slug to pull (optional when exactly one org is connected)" } }, required: [] } },
+  { name: "graph_pull", description: "Sync an org graph from the connected graph-portal (remote mode). Pulls the COMPANY graph by default \u2014 the distilled business-context graph every seat shares. Version-checked: downloads only when the portal has a newer version than the local cache. Auth comes from the device-login store (run graph_login once per machine); returns auth_required when not connected or credentials were revoked. Pass kind for an explicitly shared source graph (e.g. notion) \u2014 not_shared when your seat lacks access. Run at session start or when the graph feels stale.", inputSchema: { type: "object", properties: { force: { type: "boolean", description: "Re-download even when versions match" }, org: { type: "string", description: "Org slug to pull (optional when exactly one org is connected)" }, kind: { type: "string", description: "Graph kind: company (default) or a shared source kind like notion" } }, required: [] } },
   { name: "graph_login", description: "Connect this machine to the graph-portal via device-code login. Returns a click-URL (code prefilled) to surface to the user; they log in, pick which orgs to grant, and approve. Then call graph_auth_status until it reports authenticated. Credentials are tool-managed \u2014 no files or env vars to set.", inputSchema: { type: "object", properties: { portal: { type: "string", description: "Portal base URL (defaults to the production portal, or the previously connected one)" }, label: { type: "string", description: "Device label shown on the approval page (defaults to hostname)" } }, required: [] } },
   { name: "graph_auth_status", description: "Check whether a pending graph_login has been approved yet. On approval it saves the credential store and reports the connected orgs.", inputSchema: { type: "object", properties: {}, required: [] } },
   { name: "notion_authorize", description: "Start a one-time Notion OAuth authorization for a project. Returns a click-URL to surface to the user; on their approval it captures the callback and saves the access token (.notion-token) in the project. Runs the listener on the local machine. Use once per workspace (or after rotating the OAuth app).", inputSchema: { type: "object", properties: { project_dir: { type: "string", description: "Project folder to save the token into (Windows or WSL path)" }, client_id: { type: "string" }, client_secret: { type: "string" } }, required: ["project_dir"] } },
@@ -6334,7 +6353,7 @@ var TOOLS = [
   { name: "generate_notion_status", description: "Check the progress/result of a generate_notion_graph refresh (which runs in the background because a full content pull takes minutes). Returns running / done (with summary) / failed.", inputSchema: { type: "object", properties: { project_dir: { type: "string" } }, required: ["project_dir"] } }
 ];
 async function main() {
-  const server = new Server({ name: "graph-mcp", version: "0.2.0" }, { capabilities: { tools: {} } });
+  const server = new Server({ name: "caddy-mcp", version: "0.2.0" }, { capabilities: { tools: {} } });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
@@ -6353,7 +6372,7 @@ async function main() {
       else if (name === "graph_remember") result = graphRemember(getGraph(a.graph), a);
       else if (name === "graph_update") result = graphUpdate(getGraph(a.graph), a);
       else if (name === "graph_link") result = graphLink(getGraph(a.graph), a);
-      else if (name === "graph_pull") result = await remotePull(!!a.force, a.org);
+      else if (name === "graph_pull") result = await remotePull(!!a.force, a.org, a.kind);
       else if (name === "graph_login") result = await graphLogin(a);
       else if (name === "graph_auth_status") result = await graphAuthStatus();
       else if (name === "notion_authorize") result = notionAuthorize(a);
@@ -6363,24 +6382,24 @@ async function main() {
       else throw new Error(`Unknown tool: ${name}`);
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     } catch (e) {
-      throw new McpError(ErrorCode.InternalError, `graph-mcp: ${e?.message || e}`);
+      throw new McpError(ErrorCode.InternalError, `caddy-mcp: ${e?.message || e}`);
     }
   });
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  process.stderr.write(`[graph-mcp] ready \u2014 dirs: ${graphDirs().join(", ")}
+  process.stderr.write(`[caddy-mcp] ready \u2014 dirs: ${graphDirs().join(", ")}
 `);
   if (hasCredentials()) {
     remotePullAll().then(
-      (rs) => rs.forEach((r) => process.stderr.write(`[graph-mcp] remote sync${r.org ? ` ${r.org}` : ""}: ${r.status}${r.version ? ` v${r.version}` : ""}
+      (rs) => rs.forEach((r) => process.stderr.write(`[caddy-mcp] remote sync${r.org ? ` ${r.org}` : ""}: ${r.status}${r.version ? ` v${r.version}` : ""}
 `)),
-      (e) => process.stderr.write(`[graph-mcp] remote sync failed: ${e?.message || e}
+      (e) => process.stderr.write(`[caddy-mcp] remote sync failed: ${e?.message || e}
 `)
     );
   }
 }
 main().catch((e) => {
-  process.stderr.write(`[graph-mcp] fatal: ${e}
+  process.stderr.write(`[caddy-mcp] fatal: ${e}
 `);
   process.exit(1);
 });
