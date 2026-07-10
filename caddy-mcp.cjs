@@ -6709,6 +6709,30 @@ function discover() {
   }
   return found;
 }
+function classifyGraph(name) {
+  if (/^remote-.*\.nq$/.test(name) || /^base(-v\d+)?\.nq$/.test(name)) {
+    return {
+      role: "company-graph",
+      guidance: "COMPANY DATA: the org owner's curated union of company sources (can span Notion, Drive, HubSpot\u2026 in one graph). Treat it as the organization's shared business truth \u2014 people, clients, processes, decisions. Query it to answer business questions; do not treat it as any single platform's layout."
+    };
+  }
+  if (/^[a-z][a-z-]*-\d{8}-\d{6}\.nq$/.test(name)) {
+    return {
+      role: "account-map",
+      guidance: "ACCOUNT MAP: an exact snapshot of ONE platform account as its user sees it \u2014 structure, boards/databases, ids. Use it to navigate and operate that platform intelligently with its tools (find the right database/board/id fast). It is a layout map, not curated business truth; prefer the company graph for business questions."
+    };
+  }
+  if (/^notion-.*\.nq$/.test(name)) {
+    return {
+      role: "account-map",
+      guidance: "ACCOUNT MAP: a snapshot of one Notion workspace as that login sees it. Use it to navigate the workspace and find databases/pages/ids for tool calls; prefer the company graph for curated business questions."
+    };
+  }
+  return {
+    role: "knowledge-graph",
+    guidance: "General knowledge graph \u2014 profile it with graph_schema to see what it holds."
+  };
+}
 function graphLabel(g) {
   let dir = path7.dirname(g.path);
   if (path7.basename(dir) === "graphs") dir = path7.dirname(dir);
@@ -6734,7 +6758,7 @@ function getGraph(name) {
 }
 var GRAPH_ARG = { graph: { type: "string", description: "Graph file name (from list_graphs). Optional when only one graph exists." } };
 var TOOLS = [
-  { name: "list_graphs", description: "List the knowledge graph (.nq) files available to query, with size and last-modified.", inputSchema: { type: "object", properties: {}, required: [] } },
+  { name: "list_graphs", description: "List the knowledge graph (.nq) files available to query, with size, last-modified, and ROLE. Two roles matter: company-graph = the org owner's curated multi-source business truth (answer business questions from it); account-map = one platform account's exact layout snapshot (use it to navigate that platform's tools \u2014 ids, boards, structure). Each entry carries guidance on how to use it.", inputSchema: { type: "object", properties: {}, required: [] } },
   { name: "graph_schema", description: "Profile a graph: entity classes with counts, top predicates, named graphs. Orient here first.", inputSchema: { type: "object", properties: { ...GRAPH_ARG }, required: [] } },
   { name: "graph_search", description: "Case-insensitive text search over the graph's text predicates (labels, names, summaries). Returns matching entities with type and source.", inputSchema: { type: "object", properties: { ...GRAPH_ARG, query: { type: "string" }, type: { type: "string", description: "Filter by class local name, e.g. GHLCustomField or Decision" }, limit: { type: "number" } }, required: ["query"] } },
   { name: "graph_neighbors", description: 'BFS traversal from an entity: everything it connects to (both directions), with relationship names. Use for "what is in X" / "what connects to X".', inputSchema: { type: "object", properties: { ...GRAPH_ARG, node: { type: "string", description: "Entity id, slug, IRI, or name" }, hops: { type: "number" } }, required: ["node"] } },
@@ -6758,7 +6782,7 @@ var TOOLS = [
   { name: "generate_notion_status", description: "Check the progress/result of a generate_notion_graph refresh (which runs in the background because a full content pull takes minutes). Returns running / done (with summary) / failed.", inputSchema: { type: "object", properties: { project_dir: { type: "string" } }, required: ["project_dir"] } }
 ];
 async function main() {
-  const server = new Server({ name: "caddy-mcp", version: "0.4.0" }, { capabilities: { tools: {} } });
+  const server = new Server({ name: "caddy-mcp", version: "0.4.1" }, { capabilities: { tools: {} } });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
@@ -6768,10 +6792,12 @@ async function main() {
       if (name === "list_graphs") result = { dirs: graphDirs(), graphs: discover().map((g) => {
         const overlay = g.path.replace(/\.nq$/, ".local.nq");
         const hasOverlay = fs6.existsSync(overlay);
-        return { ...g, label: graphLabel(g), local_overlay: hasOverlay ? { file: path7.basename(overlay), sizeKB: Math.round(fs6.statSync(overlay).size / 1024) } : null };
+        return { ...g, label: graphLabel(g), ...classifyGraph(g.name), local_overlay: hasOverlay ? { file: path7.basename(overlay), sizeKB: Math.round(fs6.statSync(overlay).size / 1024) } : null };
       }) };
-      else if (name === "graph_schema") result = getGraph(a.graph).schema();
-      else if (name === "graph_search") result = getGraph(a.graph).search(a.query, a.limit || 20, a.type);
+      else if (name === "graph_schema") {
+        const g = getGraph(a.graph);
+        result = { ...classifyGraph(path7.basename(g.file)), ...g.schema() };
+      } else if (name === "graph_search") result = getGraph(a.graph).search(a.query, a.limit || 20, a.type);
       else if (name === "graph_neighbors") result = getGraph(a.graph).neighbors(a.node, a.hops || 1);
       else if (name === "graph_node") result = getGraph(a.graph).node(a.node);
       else if (name === "graph_remember") result = graphRemember(getGraph(a.graph), a);
