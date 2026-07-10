@@ -501,8 +501,8 @@ function getErrorMap() {
 
 // node_modules/zod/dist/esm/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
-  const { data, path: path5, errorMaps, issueData } = params;
-  const fullPath = [...path5, ...issueData.path || []];
+  const { data, path: path7, errorMaps, issueData } = params;
+  const fullPath = [...path7, ...issueData.path || []];
   const fullIssue = {
     ...issueData,
     path: fullPath
@@ -618,11 +618,11 @@ var errorUtil;
 
 // node_modules/zod/dist/esm/v3/types.js
 var ParseInputLazyPath = class {
-  constructor(parent, value, path5, key) {
+  constructor(parent, value, path7, key) {
     this._cachedPath = [];
     this.parent = parent;
     this.data = value;
-    this._path = path5;
+    this._path = path7;
     this._key = key;
   }
   get path() {
@@ -5495,8 +5495,8 @@ var StdioServerTransport = class {
 };
 
 // src/caddy-mcp/server.ts
-var fs4 = __toESM(require("fs"));
-var path4 = __toESM(require("path"));
+var fs5 = __toESM(require("fs"));
+var path6 = __toESM(require("path"));
 
 // src/caddy-mcp/notion-gen.ts
 var import_child_process = require("child_process");
@@ -5634,7 +5634,7 @@ function cacheDir() {
   if (env) return env.split(path2.delimiter).filter(Boolean)[0];
   return path2.join(os2.homedir(), ".caddy", "graphs");
 }
-async function remotePull(force = false, org, kind) {
+async function remotePull(force = false, org, kind, destDir) {
   const creds = loadCredentials();
   if (!creds) {
     return { status: "auth_required", hint: "Not connected to the portal. Run graph_login." };
@@ -5649,7 +5649,7 @@ async function remotePull(force = false, org, kind) {
     return { status: "unknown_org", org: slug, orgs: slugs, hint: `No credentials for org "${slug}". Run graph_login and grant it.` };
   }
   const headers = { Authorization: `Bearer ${token}`, Accept: "application/json" };
-  const dir = cacheDir();
+  const dir = destDir || cacheDir();
   if (kind && kind !== "company") {
     const kindResponse = await fetch(`${creds.url}/api/orgs/${slug}/graphs/${kind}`, { headers });
     if (kindResponse.status === 403) {
@@ -5691,6 +5691,9 @@ async function remotePull(force = false, org, kind) {
   const graphResponse = await fetch(`${creds.url}/api/orgs/${slug}/graph`, { headers });
   if (graphResponse.status === 401 || graphResponse.status === 403) {
     return { status: "auth_required", org: slug, hint: "Credentials revoked or expired. Run graph_login again." };
+  }
+  if (graphResponse.status === 409) {
+    return { status: "refresh_required", org: slug, hint: "The portal holds no copy (pass-through delivery). Run graph_refresh to generate and pull a fresh graph." };
   }
   if (!graphResponse.ok) throw new Error(`portal /graph returned ${graphResponse.status}`);
   const body = Buffer.from(await graphResponse.arrayBuffer());
@@ -5893,6 +5896,274 @@ function generateNotionStatus(a) {
   return { status: "running", last_line: last.replace(/.*\] /, "") };
 }
 
+// src/caddy-mcp/refresh.ts
+var path4 = __toESM(require("path"));
+var active = /* @__PURE__ */ new Map();
+var POLL_MS = 1e4;
+var TIMEOUT_MS = 30 * 6e4;
+function destFor(a) {
+  return a.project_dir ? path4.join(toWslPath(a.project_dir), "graphs") : void 0;
+}
+async function graphRefresh(a) {
+  const creds = loadCredentials();
+  if (!creds) return { status: "auth_required", hint: "Not connected to the portal. Run graph_login." };
+  const slugs = Object.keys(creds.orgs);
+  const slug = a.org || (slugs.length === 1 ? slugs[0] : null);
+  if (!slug) return { status: "org_required", orgs: slugs, hint: "Pass org: one of the listed slugs." };
+  const token = creds.orgs[slug];
+  if (!token) return { status: "unknown_org", org: slug, orgs: slugs, hint: `No credentials for org "${slug}". Run graph_login and grant it.` };
+  const running = active.get(slug);
+  if (running && (running.phase === "queued" || running.phase === "generating" || running.phase === "downloading")) {
+    return { status: "already_running", org: slug, phase: running.phase, hint: "Poll graph_refresh_status." };
+  }
+  const headers = { Authorization: `Bearer ${token}`, Accept: "application/json", "Content-Type": "application/json" };
+  const r = await fetch(`${creds.url}/api/orgs/${slug}/generate`, { method: "POST", headers });
+  const body = await r.json().catch(() => ({}));
+  if (r.status === 401) return { status: "auth_required", org: slug, hint: "Credentials revoked or expired. Run graph_login again." };
+  if (r.status === 403) return { status: "not_permitted", org: slug, hint: "Your seat cannot trigger a refresh (graphs.generate). Ask the org Primary to grant it, or re-run graph_login if the device was connected before packages/refresh support." };
+  if (r.status === 409) return { status: "already_running", org: slug, hint: "A generation is already in progress on the portal. Poll graph_refresh_status or retry in a minute." };
+  if (r.status === 429) return { status: "cooldown", org: slug, detail: body.message || "Refreshed too recently.", hint: "The graph was refreshed recently \u2014 pull the current one with graph_pull, or wait out the cooldown." };
+  if (r.status !== 202) return { status: "error", org: slug, error: body.message || `portal /generate returned ${r.status}` };
+  const job = String(body.job);
+  const state = { phase: "generating", org: slug, job, startedAt: Date.now() };
+  active.set(slug, state);
+  void pollUntilDone(creds.url, token, slug, job, destFor(a), state);
+  return {
+    status: "refresh_started",
+    org: slug,
+    job,
+    note: "The portal is extracting from the connected sources \u2014 this runs for a few minutes. Poll graph_refresh_status; when it reports done, the fresh graph is already in place (pass-through: the portal deletes its copy the moment it delivers)."
+  };
+}
+async function pollUntilDone(url, token, slug, job, destDir, state) {
+  const headers = { Authorization: `Bearer ${token}`, Accept: "application/json" };
+  try {
+    while (Date.now() - state.startedAt < TIMEOUT_MS) {
+      await new Promise((res) => setTimeout(res, POLL_MS));
+      const r = await fetch(`${url}/api/orgs/${slug}/jobs/${job}`, { headers });
+      if (!r.ok) {
+        state.phase = "failed";
+        state.detail = `job status returned ${r.status}`;
+        state.finishedAt = Date.now();
+        return;
+      }
+      const s = await r.json();
+      if (s.state === "failed") {
+        state.phase = "failed";
+        state.detail = s.detail || "generation failed";
+        state.finishedAt = Date.now();
+        return;
+      }
+      if (s.state === "complete") {
+        state.phase = "downloading";
+        const pulled = await remotePull(true, slug, void 0, destDir);
+        state.phase = pulled.status === "pulled" ? "done" : "failed";
+        state.detail = pulled.status === "pulled" ? void 0 : `pull after generation returned ${pulled.status}`;
+        state.result = pulled;
+        state.finishedAt = Date.now();
+        return;
+      }
+    }
+    state.phase = "failed";
+    state.detail = `timed out after ${Math.round(TIMEOUT_MS / 6e4)} minutes`;
+    state.finishedAt = Date.now();
+  } catch (e) {
+    state.phase = "failed";
+    state.detail = String(e?.message || e);
+    state.finishedAt = Date.now();
+  }
+}
+function graphRefreshStatus(a) {
+  const creds = loadCredentials();
+  const slugs = creds ? Object.keys(creds.orgs) : [];
+  const slug = a.org || (slugs.length === 1 ? slugs[0] : null);
+  if (!slug) return { status: "org_required", orgs: slugs, hint: "Pass org: one of the listed slugs." };
+  const state = active.get(slug);
+  if (!state) return { status: "no_refresh_found", org: slug, hint: "Start one with graph_refresh." };
+  return {
+    status: state.phase,
+    org: slug,
+    job: state.job,
+    elapsed_seconds: Math.round(((state.finishedAt ?? Date.now()) - state.startedAt) / 1e3),
+    detail: state.detail,
+    result: state.result ?? null
+  };
+}
+
+// src/caddy-mcp/packages.ts
+var import_child_process2 = require("child_process");
+var fs4 = __toESM(require("fs"));
+var os3 = __toESM(require("os"));
+var path5 = __toESM(require("path"));
+function portalContext(org) {
+  const creds = loadCredentials();
+  if (!creds) return { status: "auth_required", hint: "Not connected to the portal. Run graph_login." };
+  const slugs = Object.keys(creds.orgs);
+  const slug = org || (slugs.length === 1 ? slugs[0] : null);
+  if (!slug) return { status: "org_required", orgs: slugs, hint: "Pass org: one of the listed slugs." };
+  const token = creds.orgs[slug];
+  if (!token) return { status: "unknown_org", org: slug, orgs: slugs, hint: `No credentials for org "${slug}". Run graph_login and grant it.` };
+  return { url: creds.url, slug, token };
+}
+function isContext(c) {
+  return !("status" in c);
+}
+async function portalGet(ctx, apiPath) {
+  return fetch(`${ctx.url}/api/orgs/${ctx.slug}${apiPath}`, {
+    headers: { Authorization: `Bearer ${ctx.token}`, Accept: "application/json" }
+  });
+}
+function installRoot(a) {
+  return a.project_dir ? toWslPath(a.project_dir) : process.cwd();
+}
+function manifestFile(root) {
+  return path5.join(root, ".claude", "caddy-packages.json");
+}
+function readManifest(root) {
+  try {
+    return JSON.parse(fs4.readFileSync(manifestFile(root), "utf8"));
+  } catch {
+    return {};
+  }
+}
+function writeManifest(root, manifest) {
+  const file = manifestFile(root);
+  fs4.mkdirSync(path5.dirname(file), { recursive: true });
+  fs4.writeFileSync(file, JSON.stringify(manifest, null, 2) + "\n");
+}
+function defaultTarget(root, product) {
+  const kind = product.mcp_target === "plugin" ? "plugins" : "skills";
+  return path5.join(root, ".claude", kind, product.slug);
+}
+function extractTarball(tarball, product, target) {
+  const scratch = fs4.mkdtempSync(path5.join(os3.tmpdir(), "caddy-pkg-"));
+  try {
+    const r = (0, import_child_process2.spawnSync)("tar", ["-xzf", tarball, "-C", scratch, "--strip-components=1"], { encoding: "utf8" });
+    if (r.error || r.status !== 0) {
+      throw new Error(`tar extraction failed: ${r.error?.message || r.stderr?.slice(0, 300) || `exit ${r.status}`}. A system tar is required (built into Windows 10+, macOS, Linux).`);
+    }
+    const source = product.path ? path5.join(scratch, product.path) : scratch;
+    if (!fs4.existsSync(source)) {
+      throw new Error(`product path "${product.path}" not found inside the ${product.slug} archive`);
+    }
+    fs4.rmSync(target, { recursive: true, force: true });
+    fs4.mkdirSync(path5.dirname(target), { recursive: true });
+    fs4.cpSync(source, target, { recursive: true });
+    let files = 0;
+    const count = (dir) => {
+      for (const entry of fs4.readdirSync(dir, { withFileTypes: true })) {
+        if (entry.isDirectory()) count(path5.join(dir, entry.name));
+        else files++;
+      }
+    };
+    count(target);
+    return files;
+  } finally {
+    fs4.rmSync(scratch, { recursive: true, force: true });
+  }
+}
+async function packagesList(a) {
+  const ctx = portalContext(a.org);
+  if (!isContext(ctx)) return ctx;
+  const r = await portalGet(ctx, "/products");
+  if (r.status === 401 || r.status === 403) return { status: "auth_required", hint: "Credentials revoked or expired. Run graph_login again." };
+  if (r.status === 404) return { status: "unavailable", hint: "Package delivery is not enabled for this portal yet." };
+  if (!r.ok) throw new Error(`portal /products returned ${r.status}`);
+  const { products } = await r.json();
+  const manifest = readManifest(installRoot(a));
+  return {
+    status: "ok",
+    org: ctx.slug,
+    products: products.map((p) => ({
+      ...p,
+      installed: manifest[p.slug] ? { sha: manifest[p.slug].sha, target: manifest[p.slug].target, installedAt: manifest[p.slug].installedAt } : null
+    }))
+  };
+}
+async function packageInstall(a) {
+  if (!a.product) throw new Error("product is required (a slug from packages_list)");
+  const ctx = portalContext(a.org);
+  if (!isContext(ctx)) return ctx;
+  const show = await portalGet(ctx, `/products/${encodeURIComponent(a.product)}`);
+  if (show.status === 401 || show.status === 403) return { status: "auth_required", hint: "Credentials revoked or expired. Run graph_login again." };
+  if (show.status === 404) return { status: "not_found", product: a.product, hint: "Unknown product or your seat is not entitled to it." };
+  if (!show.ok) throw new Error(`portal /products/${a.product} returned ${show.status}`);
+  const product = await show.json();
+  const root = installRoot(a);
+  const manifest = readManifest(root);
+  const installed = manifest[product.slug];
+  if (!a.force && installed && installed.sha === product.version && fs4.existsSync(installed.target)) {
+    return { status: "fresh", product: product.slug, sha: product.version, target: installed.target };
+  }
+  const download = await portalGet(ctx, `/products/${encodeURIComponent(a.product)}/download`);
+  if (!download.ok) throw new Error(`portal product download returned ${download.status}`);
+  const sha = download.headers.get("x-product-sha") || product.version;
+  const tarball = path5.join(os3.tmpdir(), `caddy-${product.slug}-${sha.slice(0, 12)}.tar.gz`);
+  fs4.writeFileSync(tarball, Buffer.from(await download.arrayBuffer()));
+  const target = a.target_dir ? toWslPath(a.target_dir) : defaultTarget(root, product);
+  try {
+    const files = extractTarball(tarball, product, target);
+    manifest[product.slug] = {
+      sha,
+      target,
+      name: product.name,
+      mcp_target: product.mcp_target,
+      org: ctx.slug,
+      installedAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    writeManifest(root, manifest);
+    return {
+      status: installed ? "updated" : "installed",
+      product: product.slug,
+      name: product.name,
+      sha,
+      previous_sha: installed?.sha ?? null,
+      target,
+      files,
+      note: product.mcp_target === "plugin" ? "Installed as a plugin \u2014 restart Cowork/Claude so it loads the new plugin." : "Installed as a project skill \u2014 available to Cowork in this project immediately."
+    };
+  } finally {
+    fs4.rmSync(tarball, { force: true });
+  }
+}
+async function packagesSync(a) {
+  const ctx = portalContext(a.org);
+  if (!isContext(ctx)) return ctx;
+  const listed = await packagesList(a);
+  if (listed.status !== "ok") return listed;
+  const root = installRoot(a);
+  const manifest = readManifest(root);
+  const plan = [];
+  for (const p of listed.products) {
+    const current = manifest[p.slug];
+    if (!current || !fs4.existsSync(current.target)) {
+      plan.push({ product: p.slug, action: "install" });
+    } else if (p.version && current.sha !== p.version) {
+      plan.push({ product: p.slug, action: "update", from: current.sha.slice(0, 12), to: p.version.slice(0, 12) });
+    }
+  }
+  const entitledSlugs = new Set(listed.products.map((p) => p.slug));
+  const orphaned = Object.keys(manifest).filter((slug) => manifest[slug].org === ctx.slug && !entitledSlugs.has(slug));
+  if (a.dry_run) {
+    return { status: "plan", org: ctx.slug, pending: plan, orphaned, up_to_date: plan.length === 0 };
+  }
+  const results = [];
+  for (const step of plan) {
+    try {
+      results.push(await packageInstall({ product: step.product, org: a.org, project_dir: a.project_dir }));
+    } catch (e) {
+      results.push({ status: "error", product: step.product, error: String(e?.message || e) });
+    }
+  }
+  return {
+    status: "synced",
+    org: ctx.slug,
+    applied: results,
+    orphaned: orphaned.length ? { products: orphaned, note: "Installed but no longer entitled \u2014 not auto-removed; delete their target folders to drop them." } : null,
+    up_to_date: plan.length === 0
+  };
+}
+
 // src/caddy-mcp/server.ts
 var NS = process.env.OPS_NS || "http://ops-sys.local/ontology#";
 var CODE_NS = process.env.CODE_NS || "http://ops-sys.local/code#";
@@ -5962,12 +6233,12 @@ var Graph = class {
     this.quads = 0;
     this.skipped = 0;
     this.localQuads = 0;
-    this.mtimeMs = fs4.statSync(this.file).mtimeMs;
+    this.mtimeMs = fs5.statSync(this.file).mtimeMs;
     const masked = /* @__PURE__ */ new Set();
     const overlay = this.overlayFile();
-    if (fs4.existsSync(overlay)) {
-      this.overlayMtimeMs = fs4.statSync(overlay).mtimeMs;
-      for (const raw of fs4.readFileSync(overlay, "utf-8").split("\n")) {
+    if (fs5.existsSync(overlay)) {
+      this.overlayMtimeMs = fs5.statSync(overlay).mtimeMs;
+      for (const raw of fs5.readFileSync(overlay, "utf-8").split("\n")) {
         if (!raw.trim() || raw.trim().startsWith("#")) continue;
         const m = LINE.exec(raw);
         if (!m) {
@@ -5988,7 +6259,7 @@ var Graph = class {
     } else {
       this.overlayMtimeMs = 0;
     }
-    for (const raw of fs4.readFileSync(this.file, "utf-8").split("\n")) {
+    for (const raw of fs5.readFileSync(this.file, "utf-8").split("\n")) {
       if (!raw.trim() || raw.trim().startsWith("#")) continue;
       const m = LINE.exec(raw);
       if (!m) {
@@ -6004,9 +6275,9 @@ var Graph = class {
     }
   }
   fresh() {
-    const sourceChanged = fs4.existsSync(this.file) && fs4.statSync(this.file).mtimeMs !== this.mtimeMs;
+    const sourceChanged = fs5.existsSync(this.file) && fs5.statSync(this.file).mtimeMs !== this.mtimeMs;
     const overlay = this.overlayFile();
-    const overlayMtime = fs4.existsSync(overlay) ? fs4.statSync(overlay).mtimeMs : 0;
+    const overlayMtime = fs5.existsSync(overlay) ? fs5.statSync(overlay).mtimeMs : 0;
     if (sourceChanged || overlayMtime !== this.overlayMtimeMs) this.load();
   }
   types(s) {
@@ -6150,15 +6421,15 @@ function resolvePred(pred) {
   return pred.includes("://") ? pred : NS + pred;
 }
 function endsWithNewline(file) {
-  const fd = fs4.openSync(file, "r");
+  const fd = fs5.openSync(file, "r");
   try {
-    const size = fs4.fstatSync(fd).size;
+    const size = fs5.fstatSync(fd).size;
     if (size === 0) return true;
     const b = Buffer.alloc(1);
-    fs4.readSync(fd, b, 0, 1, size - 1);
+    fs5.readSync(fd, b, 0, 1, size - 1);
     return b[0] === 10;
   } finally {
-    fs4.closeSync(fd);
+    fs5.closeSync(fd);
   }
 }
 function appendQuads(g, lines) {
@@ -6166,11 +6437,11 @@ function appendQuads(g, lines) {
     if (!LINE.test(l)) throw new Error(`refusing write \u2014 invalid N-Quads line: ${l.slice(0, 120)}`);
   }
   const overlay = g.overlayFile();
-  if (fs4.existsSync(overlay)) {
-    fs4.copyFileSync(overlay, overlay + ".bak");
-    fs4.appendFileSync(overlay, (endsWithNewline(overlay) ? "" : "\n") + lines.join("\n") + "\n");
+  if (fs5.existsSync(overlay)) {
+    fs5.copyFileSync(overlay, overlay + ".bak");
+    fs5.appendFileSync(overlay, (endsWithNewline(overlay) ? "" : "\n") + lines.join("\n") + "\n");
   } else {
-    fs4.writeFileSync(overlay, lines.join("\n") + "\n");
+    fs5.writeFileSync(overlay, lines.join("\n") + "\n");
   }
   g.load();
 }
@@ -6195,7 +6466,7 @@ function graphRemember(g, a) {
   if (a.about) lines.push(quadLine(iri, NS + "about", { iri: mustResolve(g, a.about, "about entity") }));
   for (const l of a.links || []) lines.push(quadLine(iri, NS + "relatesTo", { iri: mustResolve(g, l, "link target") }));
   appendQuads(g, lines);
-  return { status: "remembered", id: localName(iri), class: typed ? a.type : "Note", quads_added: lines.length, graph: path4.basename(g.file) };
+  return { status: "remembered", id: localName(iri), class: typed ? a.type : "Note", quads_added: lines.length, graph: path6.basename(g.file) };
 }
 function graphUpdate(g, a) {
   if (!a.node || !a.predicate) throw new Error("node and predicate are required");
@@ -6205,11 +6476,11 @@ function graphUpdate(g, a) {
   const p = resolvePred(a.predicate);
   if (mode === "restore") {
     const overlay = g.overlayFile();
-    if (!fs4.existsSync(overlay)) return { status: "nothing_to_restore", node: localName(s), predicate: localName(p) };
-    fs4.copyFileSync(overlay, overlay + ".bak");
+    if (!fs5.existsSync(overlay)) return { status: "nothing_to_restore", node: localName(s), predicate: localName(p) };
+    fs5.copyFileSync(overlay, overlay + ".bak");
     let removed = 0;
     const kept = [];
-    for (const raw of fs4.readFileSync(overlay, "utf-8").split("\n")) {
+    for (const raw of fs5.readFileSync(overlay, "utf-8").split("\n")) {
       if (!raw.trim()) continue;
       const m = LINE.exec(raw);
       const isOverrideMarker = m && parseTerm(m[1]).value === s && parseTerm(m[2]).value === OVERRIDES_P && parseTerm(m[3]).value === p;
@@ -6220,10 +6491,10 @@ function graphUpdate(g, a) {
       }
       kept.push(raw);
     }
-    fs4.writeFileSync(overlay + ".tmp", kept.join("\n") + (kept.length ? "\n" : ""));
-    fs4.renameSync(overlay + ".tmp", overlay);
+    fs5.writeFileSync(overlay + ".tmp", kept.join("\n") + (kept.length ? "\n" : ""));
+    fs5.renameSync(overlay + ".tmp", overlay);
     g.load();
-    return { status: "restored", node: localName(s), predicate: localName(p), overlay_lines_removed: removed, graph: path4.basename(g.file) };
+    return { status: "restored", node: localName(s), predicate: localName(p), overlay_lines_removed: removed, graph: path6.basename(g.file) };
   }
   const newLine = quadLine(s, p, { lit: String(a.value) });
   if (!LINE.test(newLine)) throw new Error("refusing write \u2014 invalid N-Quads line");
@@ -6231,10 +6502,10 @@ function graphUpdate(g, a) {
     const marker = `<${s}> <${OVERRIDES_P}> <${p}> <${REMEMBERED_G2}> .`;
     const overlay = g.overlayFile();
     let removed = 0;
-    if (fs4.existsSync(overlay)) {
-      fs4.copyFileSync(overlay, overlay + ".bak");
+    if (fs5.existsSync(overlay)) {
+      fs5.copyFileSync(overlay, overlay + ".bak");
       const kept = [];
-      for (const raw of fs4.readFileSync(overlay, "utf-8").split("\n")) {
+      for (const raw of fs5.readFileSync(overlay, "utf-8").split("\n")) {
         if (!raw.trim()) continue;
         const m = LINE.exec(raw);
         const sameSP = m && parseTerm(m[1]).value === s && (parseTerm(m[2]).value === p || parseTerm(m[2]).value === OVERRIDES_P && parseTerm(m[3]).value === p);
@@ -6245,18 +6516,18 @@ function graphUpdate(g, a) {
         kept.push(raw);
       }
       kept.push(marker, newLine);
-      fs4.writeFileSync(overlay + ".tmp", kept.join("\n") + "\n");
-      fs4.renameSync(overlay + ".tmp", overlay);
+      fs5.writeFileSync(overlay + ".tmp", kept.join("\n") + "\n");
+      fs5.renameSync(overlay + ".tmp", overlay);
       g.load();
     } else {
-      fs4.writeFileSync(overlay, marker + "\n" + newLine + "\n");
+      fs5.writeFileSync(overlay, marker + "\n" + newLine + "\n");
       g.load();
     }
     const masked = (g.spo.get(s) || []).filter((t) => t.p === p).length;
-    return { status: "updated", node: localName(s), predicate: localName(p), mode: "replace (override)", overlay_lines_replaced: removed, values_now: masked, graph: path4.basename(g.file) };
+    return { status: "updated", node: localName(s), predicate: localName(p), mode: "replace (override)", overlay_lines_replaced: removed, values_now: masked, graph: path6.basename(g.file) };
   }
   appendQuads(g, [newLine]);
-  return { status: "updated", node: localName(s), predicate: localName(p), mode, quads_removed: 0, quads_added: 1, graph: path4.basename(g.file) };
+  return { status: "updated", node: localName(s), predicate: localName(p), mode, quads_removed: 0, quads_added: 1, graph: path6.basename(g.file) };
 }
 function graphLink(g, a) {
   if (!a.from || !a.rel || !a.to) throw new Error("from, rel, and to are required");
@@ -6267,15 +6538,15 @@ function graphLink(g, a) {
     return { status: "already_linked", from: localName(s), rel: localName(p), to: localName(t) };
   }
   appendQuads(g, [quadLine(s, p, { iri: t })]);
-  return { status: "linked", from: localName(s), rel: localName(p), to: localName(t), graph: path4.basename(g.file) };
+  return { status: "linked", from: localName(s), rel: localName(p), to: localName(t), graph: path6.basename(g.file) };
 }
 var cache = /* @__PURE__ */ new Map();
 function graphDirs() {
   const env = process.env.GRAPH_DIR;
-  if (env) return env.split(path4.delimiter).filter(Boolean);
-  const dirs = [process.cwd(), path4.join(process.cwd(), "graphs")];
+  if (env) return env.split(path6.delimiter).filter(Boolean);
+  const dirs = [process.cwd(), path6.join(process.cwd(), "graphs")];
   if (hasCredentials()) {
-    dirs.push(path4.join(require("os").homedir(), ".caddy", "graphs"));
+    dirs.push(path6.join(require("os").homedir(), ".caddy", "graphs"));
   }
   return dirs;
 }
@@ -6283,38 +6554,38 @@ function discover() {
   const found = [];
   const seen = /* @__PURE__ */ new Set();
   const scan = (dir) => {
-    if (!fs4.existsSync(dir)) return;
-    for (const f of fs4.readdirSync(dir)) {
+    if (!fs5.existsSync(dir)) return;
+    for (const f of fs5.readdirSync(dir)) {
       if (!f.endsWith(".nq")) continue;
       if (f.endsWith(".local.nq") || /\.v\d+\.nq$/.test(f)) continue;
-      const full = path4.join(dir, f);
+      const full = path6.join(dir, f);
       if (seen.has(full)) continue;
       seen.add(full);
-      const st = fs4.statSync(full);
+      const st = fs5.statSync(full);
       found.push({ name: f, path: full, sizeKB: Math.round(st.size / 1024), modified: st.mtime.toISOString() });
     }
   };
   for (const dir of graphDirs()) {
     scan(dir);
-    scan(path4.join(dir, "graphs"));
-    if (!fs4.existsSync(dir)) continue;
-    for (const sub of fs4.readdirSync(dir)) {
-      const subPath = path4.join(dir, sub);
+    scan(path6.join(dir, "graphs"));
+    if (!fs5.existsSync(dir)) continue;
+    for (const sub of fs5.readdirSync(dir)) {
+      const subPath = path6.join(dir, sub);
       try {
-        if (!fs4.statSync(subPath).isDirectory()) continue;
+        if (!fs5.statSync(subPath).isDirectory()) continue;
       } catch {
         continue;
       }
       scan(subPath);
-      scan(path4.join(subPath, "graphs"));
+      scan(path6.join(subPath, "graphs"));
     }
   }
   return found;
 }
 function graphLabel(g) {
-  let dir = path4.dirname(g.path);
-  if (path4.basename(dir) === "graphs") dir = path4.dirname(dir);
-  return `${path4.basename(dir)}/${g.name}`;
+  let dir = path6.dirname(g.path);
+  if (path6.basename(dir) === "graphs") dir = path6.dirname(dir);
+  return `${path6.basename(dir)}/${g.name}`;
 }
 function getGraph(name) {
   const graphs = discover();
@@ -6344,7 +6615,12 @@ var TOOLS = [
   { name: "graph_remember", description: `Add new knowledge to a graph so it appreciates over time. Creates a Note (or a typed entity when type+name are given) carrying the fact, with provenance (addedAt/addedBy) and optional links to existing entities. Resolve "about"/"links" targets with graph_search first \u2014 never invent ids. Confirm with the user before consequential writes. Writes land in the graph's local overlay (<graph>.local.nq) \u2014 the source artifact is never modified, so pulled/regenerated graphs keep every remembered fact across refreshes. Backed up (.bak) on every write.`, inputSchema: { type: "object", properties: { ...GRAPH_ARG, fact: { type: "string", description: "The knowledge to store, in plain language" }, about: { type: "string", description: "Existing entity this fact is about (id/name \u2014 resolved against the graph)" }, type: { type: "string", description: "With name: create a typed entity (e.g. Client, Process, Decision) instead of a Note" }, name: { type: "string", description: "Label for the new entity" }, links: { type: "array", items: { type: "string" }, description: "Existing entities to relate this to (relatesTo edges)" }, source: { type: "string", description: "Attribution, default cowork-remember" } }, required: ["fact"] } },
   { name: "graph_update", description: 'Update a property on an existing entity. mode "replace" (default) writes an OVERRIDE into the local overlay: the new value masks every source value of that predicate and keeps winning across graph refreshes until mode "restore" clears it. mode "append" adds another value alongside. mode "restore" removes the override so the source values reappear. The source artifact is never rewritten. Literal values only \u2014 use graph_link for relationships. Resolve the node with graph_search first. Confirm with the user before consequential writes.', inputSchema: { type: "object", properties: { ...GRAPH_ARG, node: { type: "string", description: "Entity id, slug, IRI, or name" }, predicate: { type: "string", description: "Property local name (e.g. description, status, noteText) or full IRI" }, value: { type: "string", description: "Required except for mode restore" }, mode: { type: "string", enum: ["replace", "append", "restore"] } }, required: ["node", "predicate"] } },
   { name: "graph_link", description: "Add a relationship edge between two EXISTING entities (e.g. client \u2192 ownedBy \u2192 person). Both ends must already resolve in the graph; duplicates are refused. Confirm with the user before consequential writes.", inputSchema: { type: "object", properties: { ...GRAPH_ARG, from: { type: "string" }, rel: { type: "string", description: "Relationship local name (e.g. ownedBy, relatesTo, affects) or full IRI" }, to: { type: "string" } }, required: ["from", "rel", "to"] } },
-  { name: "graph_pull", description: "Sync an org graph from the connected graph-portal (remote mode). Pulls the COMPANY graph by default \u2014 the distilled business-context graph every seat shares. Version-checked: downloads only when the portal has a newer version than the local cache. Auth comes from the device-login store (run graph_login once per machine); returns auth_required when not connected or credentials were revoked. Pass kind for an explicitly shared source graph (e.g. notion) \u2014 not_shared when your seat lacks access. Run at session start or when the graph feels stale.", inputSchema: { type: "object", properties: { force: { type: "boolean", description: "Re-download even when versions match" }, org: { type: "string", description: "Org slug to pull (optional when exactly one org is connected)" }, kind: { type: "string", description: "Graph kind: company (default) or a shared source kind like notion" } }, required: [] } },
+  { name: "graph_pull", description: "Sync an org graph from the connected graph-portal. Version-checked: downloads only when the portal has a newer version than the local copy. Auth comes from the device-login store (run graph_login once per machine); returns auth_required when not connected or credentials were revoked. The portal is PASS-THROUGH (no data at rest): refresh_required means it holds no copy \u2014 run graph_refresh to generate and land a fresh one. Pass project_dir to pull into the Cowork project's graphs/ folder instead of the machine cache. Pass kind for an explicitly shared source graph (e.g. notion) \u2014 not_shared when your seat lacks access. Run at session start or when the graph feels stale.", inputSchema: { type: "object", properties: { force: { type: "boolean", description: "Re-download even when versions match" }, org: { type: "string", description: "Org slug to pull (optional when exactly one org is connected)" }, kind: { type: "string", description: "Graph kind: company (default) or a shared source kind like notion" }, project_dir: { type: "string", description: "Cowork project folder \u2014 the graph lands in <project_dir>/graphs (Windows or WSL path)" } }, required: [] } },
+  { name: "graph_refresh", description: "Generate a FRESH org graph and land it in the project \u2014 the full pass-through cycle: the portal extracts from the org's connected sources (Notion etc.), streams the result here, deletes its copy (no data at rest), and the graph lands in <project_dir>/graphs. Runs for a few minutes in the background \u2014 poll graph_refresh_status. Use when the graph is stale or graph_pull says refresh_required. Requires the graphs.generate capability on your seat; cooldown-limited portal-side.", inputSchema: { type: "object", properties: { org: { type: "string", description: "Org slug (optional when exactly one org is connected)" }, project_dir: { type: "string", description: "Cowork project folder \u2014 the fresh graph lands in <project_dir>/graphs (recommended; omit to use the machine cache)" } }, required: [] } },
+  { name: "graph_refresh_status", description: "Progress of a graph_refresh: generating (portal extracting) \u2192 downloading \u2192 done (graph in place, with file/version) or failed (with detail).", inputSchema: { type: "object", properties: { org: { type: "string", description: "Org slug (optional when exactly one org is connected)" } }, required: [] } },
+  { name: "packages_list", description: "List the products/packages this seat is entitled to on the portal, with current version (commit SHA) and local install state. The catalog is entitlement-scoped: only assigned packages appear.", inputSchema: { type: "object", properties: { org: { type: "string", description: "Org slug (optional when exactly one org is connected)" }, project_dir: { type: "string", description: "Cowork project folder (for install-state; defaults to cwd)" } }, required: [] } },
+  { name: "package_install", description: "Install or update one entitled package into the Cowork project. The portal streams the content from our private repos server-side \u2014 no GitHub credential ever reaches this machine. Unpacks into <project>/.claude/skills/<slug> (or plugins/<slug> per the product), replacing any prior version; records the installed SHA in .claude/caddy-packages.json. Skips the download when already current (pass force to reinstall).", inputSchema: { type: "object", properties: { product: { type: "string", description: "Product slug from packages_list" }, org: { type: "string" }, project_dir: { type: "string", description: "Cowork project folder (defaults to cwd)" }, target_dir: { type: "string", description: "Override the install location" }, force: { type: "boolean", description: "Reinstall even when current" } }, required: ["product"] } },
+  { name: "packages_sync", description: "Make this project match the portal entitlements: install every assigned package that's missing and update every stale one. Reports orphans (installed but no longer entitled) without deleting them. Pass dry_run to see the plan without applying. Run after onboarding or when the team assigns you something new.", inputSchema: { type: "object", properties: { org: { type: "string" }, project_dir: { type: "string", description: "Cowork project folder (defaults to cwd)" }, dry_run: { type: "boolean", description: "Report the plan without installing" } }, required: [] } },
   { name: "graph_login", description: "Connect this machine to the graph-portal via device-code login. Returns a click-URL (code prefilled) to surface to the user; they log in, pick which orgs to grant, and approve. Then call graph_auth_status until it reports authenticated. Credentials are tool-managed \u2014 no files or env vars to set.", inputSchema: { type: "object", properties: { portal: { type: "string", description: "Portal base URL (defaults to the production portal, or the previously connected one)" }, label: { type: "string", description: "Device label shown on the approval page (defaults to hostname)" } }, required: [] } },
   { name: "graph_auth_status", description: "Check whether a pending graph_login has been approved yet. On approval it saves the credential store and reports the connected orgs.", inputSchema: { type: "object", properties: {}, required: [] } },
   { name: "notion_authorize", description: "Start a one-time Notion OAuth authorization for a project. Returns a click-URL to surface to the user; on their approval it captures the callback and saves the access token (.notion-token) in the project. Runs the listener on the local machine. Use once per workspace (or after rotating the OAuth app).", inputSchema: { type: "object", properties: { project_dir: { type: "string", description: "Project folder to save the token into (Windows or WSL path)" }, client_id: { type: "string" }, client_secret: { type: "string" } }, required: ["project_dir"] } },
@@ -6353,7 +6629,7 @@ var TOOLS = [
   { name: "generate_notion_status", description: "Check the progress/result of a generate_notion_graph refresh (which runs in the background because a full content pull takes minutes). Returns running / done (with summary) / failed.", inputSchema: { type: "object", properties: { project_dir: { type: "string" } }, required: ["project_dir"] } }
 ];
 async function main() {
-  const server = new Server({ name: "caddy-mcp", version: "0.2.0" }, { capabilities: { tools: {} } });
+  const server = new Server({ name: "caddy-mcp", version: "0.3.0" }, { capabilities: { tools: {} } });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
@@ -6362,8 +6638,8 @@ async function main() {
       let result;
       if (name === "list_graphs") result = { dirs: graphDirs(), graphs: discover().map((g) => {
         const overlay = g.path.replace(/\.nq$/, ".local.nq");
-        const hasOverlay = fs4.existsSync(overlay);
-        return { ...g, label: graphLabel(g), local_overlay: hasOverlay ? { file: path4.basename(overlay), sizeKB: Math.round(fs4.statSync(overlay).size / 1024) } : null };
+        const hasOverlay = fs5.existsSync(overlay);
+        return { ...g, label: graphLabel(g), local_overlay: hasOverlay ? { file: path6.basename(overlay), sizeKB: Math.round(fs5.statSync(overlay).size / 1024) } : null };
       }) };
       else if (name === "graph_schema") result = getGraph(a.graph).schema();
       else if (name === "graph_search") result = getGraph(a.graph).search(a.query, a.limit || 20, a.type);
@@ -6372,7 +6648,12 @@ async function main() {
       else if (name === "graph_remember") result = graphRemember(getGraph(a.graph), a);
       else if (name === "graph_update") result = graphUpdate(getGraph(a.graph), a);
       else if (name === "graph_link") result = graphLink(getGraph(a.graph), a);
-      else if (name === "graph_pull") result = await remotePull(!!a.force, a.org, a.kind);
+      else if (name === "graph_pull") result = await remotePull(!!a.force, a.org, a.kind, a.project_dir ? path6.join(toWslPath(a.project_dir), "graphs") : void 0);
+      else if (name === "graph_refresh") result = await graphRefresh(a);
+      else if (name === "graph_refresh_status") result = graphRefreshStatus(a);
+      else if (name === "packages_list") result = await packagesList(a);
+      else if (name === "package_install") result = await packageInstall(a);
+      else if (name === "packages_sync") result = await packagesSync(a);
       else if (name === "graph_login") result = await graphLogin(a);
       else if (name === "graph_auth_status") result = await graphAuthStatus();
       else if (name === "notion_authorize") result = notionAuthorize(a);
