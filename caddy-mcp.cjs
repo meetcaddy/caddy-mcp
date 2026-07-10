@@ -501,8 +501,8 @@ function getErrorMap() {
 
 // node_modules/zod/dist/esm/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
-  const { data, path: path7, errorMaps, issueData } = params;
-  const fullPath = [...path7, ...issueData.path || []];
+  const { data, path: path8, errorMaps, issueData } = params;
+  const fullPath = [...path8, ...issueData.path || []];
   const fullIssue = {
     ...issueData,
     path: fullPath
@@ -618,11 +618,11 @@ var errorUtil;
 
 // node_modules/zod/dist/esm/v3/types.js
 var ParseInputLazyPath = class {
-  constructor(parent, value, path7, key) {
+  constructor(parent, value, path8, key) {
     this._cachedPath = [];
     this.parent = parent;
     this.data = value;
-    this._path = path7;
+    this._path = path8;
     this._key = key;
   }
   get path() {
@@ -5495,8 +5495,8 @@ var StdioServerTransport = class {
 };
 
 // src/caddy-mcp/server.ts
-var fs5 = __toESM(require("fs"));
-var path6 = __toESM(require("path"));
+var fs6 = __toESM(require("fs"));
+var path7 = __toESM(require("path"));
 
 // src/caddy-mcp/notion-gen.ts
 var import_child_process = require("child_process");
@@ -5990,11 +5990,138 @@ function graphRefreshStatus(a) {
   };
 }
 
+// src/caddy-mcp/accountmap.ts
+var fs4 = __toESM(require("fs"));
+var path5 = __toESM(require("path"));
+var active2 = /* @__PURE__ */ new Map();
+var POLL_MS2 = 1e4;
+var TIMEOUT_MS2 = 30 * 6e4;
+function stateKey(slug, provider) {
+  return `${slug}:${provider}`;
+}
+function mapsDir(a) {
+  const root = a.project_dir ? toWslPath(a.project_dir) : process.cwd();
+  return path5.join(root, "graphs");
+}
+function timestamp() {
+  return (/* @__PURE__ */ new Date()).toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
+}
+async function accountMapRefresh(a) {
+  if (!a.provider) throw new Error("provider is required (e.g. notion)");
+  const creds = loadCredentials();
+  if (!creds) return { status: "auth_required", hint: "Not connected to the portal. Run graph_login." };
+  const slugs = Object.keys(creds.orgs);
+  const slug = a.org || (slugs.length === 1 ? slugs[0] : null);
+  if (!slug) return { status: "org_required", orgs: slugs, hint: "Pass org: one of the listed slugs." };
+  const token = creds.orgs[slug];
+  if (!token) return { status: "unknown_org", org: slug, orgs: slugs, hint: `No credentials for org "${slug}". Run graph_login and grant it.` };
+  const key = stateKey(slug, a.provider);
+  const running = active2.get(key);
+  if (running && running.phase !== "done" && running.phase !== "failed") {
+    return { status: "already_running", org: slug, provider: a.provider, phase: running.phase, hint: "Poll account_map_status." };
+  }
+  const headers = { Authorization: `Bearer ${token}`, Accept: "application/json", "Content-Type": "application/json" };
+  const r = await fetch(`${creds.url}/api/orgs/${slug}/account-maps/${a.provider}/generate`, { method: "POST", headers });
+  const body = await r.json().catch(() => ({}));
+  if (r.status === 401 || r.status === 403) return { status: "auth_required", org: slug, hint: "Credentials revoked or expired. Run graph_login again." };
+  if (r.status === 404) return { status: "unknown_provider", provider: a.provider };
+  if (r.status === 409) return { status: "already_running", org: slug, provider: a.provider, hint: "A generation is already in progress. Poll account_map_status or retry in a minute." };
+  if (r.status === 422) return { status: "not_connected", org: slug, provider: a.provider, detail: body.message, hint: `Connect YOUR ${a.provider} account on the portal's Connections page first \u2014 an account map runs on your own login.` };
+  if (r.status === 429) return { status: "cooldown", org: slug, provider: a.provider, detail: body.message || "Refreshed too recently." };
+  if (r.status !== 202) return { status: "error", org: slug, error: body.message || `portal account-map generate returned ${r.status}` };
+  const state = { phase: "generating", org: slug, provider: a.provider, job: String(body.job), startedAt: Date.now() };
+  active2.set(key, state);
+  void pollAndLand(creds.url, token, slug, a.provider, mapsDir(a), state);
+  return {
+    status: "refresh_started",
+    org: slug,
+    provider: a.provider,
+    job: state.job,
+    note: "The portal is extracting with YOUR grant \u2014 this runs for a few minutes. Poll account_map_status; when done, the map is in the project (the portal deletes its copy the moment it delivers)."
+  };
+}
+async function pollAndLand(url, token, slug, provider, dir, state) {
+  const headers = { Authorization: `Bearer ${token}`, Accept: "application/json" };
+  try {
+    while (Date.now() - state.startedAt < TIMEOUT_MS2) {
+      await new Promise((res) => setTimeout(res, POLL_MS2));
+      const r = await fetch(`${url}/api/orgs/${slug}/jobs/${state.job}`, { headers });
+      if (!r.ok) {
+        state.phase = "failed";
+        state.detail = `job status returned ${r.status}`;
+        state.finishedAt = Date.now();
+        return;
+      }
+      const s = await r.json();
+      if (s.state === "failed") {
+        state.phase = "failed";
+        state.detail = s.detail || "generation failed";
+        state.finishedAt = Date.now();
+        return;
+      }
+      if (s.state !== "complete") continue;
+      state.phase = "downloading";
+      const download = await fetch(`${url}/api/orgs/${slug}/account-maps/${provider}`, { headers });
+      if (!download.ok) {
+        state.phase = "failed";
+        state.detail = `map download returned ${download.status}`;
+        state.finishedAt = Date.now();
+        return;
+      }
+      const bytes = Buffer.from(await download.arrayBuffer());
+      fs4.mkdirSync(dir, { recursive: true });
+      const file = path5.join(dir, `${provider}-${timestamp()}.nq`);
+      fs4.writeFileSync(file + ".tmp", bytes);
+      fs4.renameSync(file + ".tmp", file);
+      const previous = fs4.readdirSync(dir).filter((f) => f.startsWith(`${provider}-`) && f.endsWith(".nq") && !f.endsWith(".local.nq") && path5.join(dir, f) !== file).sort().reverse();
+      if (previous[0]) {
+        const prevOverlay = path5.join(dir, previous[0].replace(/\.nq$/, ".local.nq"));
+        if (fs4.existsSync(prevOverlay)) {
+          fs4.copyFileSync(prevOverlay, file.replace(/\.nq$/, ".local.nq"));
+        }
+      }
+      for (const f of previous.slice(1)) {
+        fs4.rmSync(path5.join(dir, f), { force: true });
+        fs4.rmSync(path5.join(dir, f.replace(/\.nq$/, ".local.nq")), { force: true });
+      }
+      state.phase = "done";
+      state.result = { file, bytes: bytes.length };
+      state.finishedAt = Date.now();
+      return;
+    }
+    state.phase = "failed";
+    state.detail = `timed out after ${Math.round(TIMEOUT_MS2 / 6e4)} minutes`;
+    state.finishedAt = Date.now();
+  } catch (e) {
+    state.phase = "failed";
+    state.detail = String(e?.message || e);
+    state.finishedAt = Date.now();
+  }
+}
+function accountMapStatus(a) {
+  if (!a.provider) throw new Error("provider is required (e.g. notion)");
+  const creds = loadCredentials();
+  const slugs = creds ? Object.keys(creds.orgs) : [];
+  const slug = a.org || (slugs.length === 1 ? slugs[0] : null);
+  if (!slug) return { status: "org_required", orgs: slugs, hint: "Pass org: one of the listed slugs." };
+  const state = active2.get(stateKey(slug, a.provider));
+  if (!state) return { status: "no_refresh_found", org: slug, provider: a.provider, hint: "Start one with account_map_refresh." };
+  return {
+    status: state.phase,
+    org: slug,
+    provider: state.provider,
+    job: state.job,
+    elapsed_seconds: Math.round(((state.finishedAt ?? Date.now()) - state.startedAt) / 1e3),
+    detail: state.detail,
+    result: state.result ?? null
+  };
+}
+
 // src/caddy-mcp/packages.ts
 var import_child_process2 = require("child_process");
-var fs4 = __toESM(require("fs"));
+var fs5 = __toESM(require("fs"));
 var os3 = __toESM(require("os"));
-var path5 = __toESM(require("path"));
+var path6 = __toESM(require("path"));
 function portalContext(org) {
   const creds = loadCredentials();
   if (!creds) return { status: "auth_required", hint: "Not connected to the portal. Run graph_login." };
@@ -6017,49 +6144,49 @@ function installRoot(a) {
   return a.project_dir ? toWslPath(a.project_dir) : process.cwd();
 }
 function manifestFile(root) {
-  return path5.join(root, ".claude", "caddy-packages.json");
+  return path6.join(root, ".claude", "caddy-packages.json");
 }
 function readManifest(root) {
   try {
-    return JSON.parse(fs4.readFileSync(manifestFile(root), "utf8"));
+    return JSON.parse(fs5.readFileSync(manifestFile(root), "utf8"));
   } catch {
     return {};
   }
 }
 function writeManifest(root, manifest) {
   const file = manifestFile(root);
-  fs4.mkdirSync(path5.dirname(file), { recursive: true });
-  fs4.writeFileSync(file, JSON.stringify(manifest, null, 2) + "\n");
+  fs5.mkdirSync(path6.dirname(file), { recursive: true });
+  fs5.writeFileSync(file, JSON.stringify(manifest, null, 2) + "\n");
 }
 function defaultTarget(root, product) {
   const kind = product.mcp_target === "plugin" ? "plugins" : "skills";
-  return path5.join(root, ".claude", kind, product.slug);
+  return path6.join(root, ".claude", kind, product.slug);
 }
 function extractTarball(tarball, product, target) {
-  const scratch = fs4.mkdtempSync(path5.join(os3.tmpdir(), "caddy-pkg-"));
+  const scratch = fs5.mkdtempSync(path6.join(os3.tmpdir(), "caddy-pkg-"));
   try {
     const r = (0, import_child_process2.spawnSync)("tar", ["-xzf", tarball, "-C", scratch, "--strip-components=1"], { encoding: "utf8" });
     if (r.error || r.status !== 0) {
       throw new Error(`tar extraction failed: ${r.error?.message || r.stderr?.slice(0, 300) || `exit ${r.status}`}. A system tar is required (built into Windows 10+, macOS, Linux).`);
     }
-    const source = product.path ? path5.join(scratch, product.path) : scratch;
-    if (!fs4.existsSync(source)) {
+    const source = product.path ? path6.join(scratch, product.path) : scratch;
+    if (!fs5.existsSync(source)) {
       throw new Error(`product path "${product.path}" not found inside the ${product.slug} archive`);
     }
-    fs4.rmSync(target, { recursive: true, force: true });
-    fs4.mkdirSync(path5.dirname(target), { recursive: true });
-    fs4.cpSync(source, target, { recursive: true });
+    fs5.rmSync(target, { recursive: true, force: true });
+    fs5.mkdirSync(path6.dirname(target), { recursive: true });
+    fs5.cpSync(source, target, { recursive: true });
     let files = 0;
     const count = (dir) => {
-      for (const entry of fs4.readdirSync(dir, { withFileTypes: true })) {
-        if (entry.isDirectory()) count(path5.join(dir, entry.name));
+      for (const entry of fs5.readdirSync(dir, { withFileTypes: true })) {
+        if (entry.isDirectory()) count(path6.join(dir, entry.name));
         else files++;
       }
     };
     count(target);
     return files;
   } finally {
-    fs4.rmSync(scratch, { recursive: true, force: true });
+    fs5.rmSync(scratch, { recursive: true, force: true });
   }
 }
 async function packagesList(a) {
@@ -6092,14 +6219,14 @@ async function packageInstall(a) {
   const root = installRoot(a);
   const manifest = readManifest(root);
   const installed = manifest[product.slug];
-  if (!a.force && installed && installed.sha === product.version && fs4.existsSync(installed.target)) {
+  if (!a.force && installed && installed.sha === product.version && fs5.existsSync(installed.target)) {
     return { status: "fresh", product: product.slug, sha: product.version, target: installed.target };
   }
   const download = await portalGet(ctx, `/products/${encodeURIComponent(a.product)}/download`);
   if (!download.ok) throw new Error(`portal product download returned ${download.status}`);
   const sha = download.headers.get("x-product-sha") || product.version;
-  const tarball = path5.join(os3.tmpdir(), `caddy-${product.slug}-${sha.slice(0, 12)}.tar.gz`);
-  fs4.writeFileSync(tarball, Buffer.from(await download.arrayBuffer()));
+  const tarball = path6.join(os3.tmpdir(), `caddy-${product.slug}-${sha.slice(0, 12)}.tar.gz`);
+  fs5.writeFileSync(tarball, Buffer.from(await download.arrayBuffer()));
   const target = a.target_dir ? toWslPath(a.target_dir) : defaultTarget(root, product);
   try {
     const files = extractTarball(tarball, product, target);
@@ -6123,7 +6250,7 @@ async function packageInstall(a) {
       note: product.mcp_target === "plugin" ? "Installed as a plugin \u2014 restart Cowork/Claude so it loads the new plugin." : "Installed as a project skill \u2014 available to Cowork in this project immediately."
     };
   } finally {
-    fs4.rmSync(tarball, { force: true });
+    fs5.rmSync(tarball, { force: true });
   }
 }
 async function packagesSync(a) {
@@ -6136,7 +6263,7 @@ async function packagesSync(a) {
   const plan = [];
   for (const p of listed.products) {
     const current = manifest[p.slug];
-    if (!current || !fs4.existsSync(current.target)) {
+    if (!current || !fs5.existsSync(current.target)) {
       plan.push({ product: p.slug, action: "install" });
     } else if (p.version && current.sha !== p.version) {
       plan.push({ product: p.slug, action: "update", from: current.sha.slice(0, 12), to: p.version.slice(0, 12) });
@@ -6233,12 +6360,12 @@ var Graph = class {
     this.quads = 0;
     this.skipped = 0;
     this.localQuads = 0;
-    this.mtimeMs = fs5.statSync(this.file).mtimeMs;
+    this.mtimeMs = fs6.statSync(this.file).mtimeMs;
     const masked = /* @__PURE__ */ new Set();
     const overlay = this.overlayFile();
-    if (fs5.existsSync(overlay)) {
-      this.overlayMtimeMs = fs5.statSync(overlay).mtimeMs;
-      for (const raw of fs5.readFileSync(overlay, "utf-8").split("\n")) {
+    if (fs6.existsSync(overlay)) {
+      this.overlayMtimeMs = fs6.statSync(overlay).mtimeMs;
+      for (const raw of fs6.readFileSync(overlay, "utf-8").split("\n")) {
         if (!raw.trim() || raw.trim().startsWith("#")) continue;
         const m = LINE.exec(raw);
         if (!m) {
@@ -6259,7 +6386,7 @@ var Graph = class {
     } else {
       this.overlayMtimeMs = 0;
     }
-    for (const raw of fs5.readFileSync(this.file, "utf-8").split("\n")) {
+    for (const raw of fs6.readFileSync(this.file, "utf-8").split("\n")) {
       if (!raw.trim() || raw.trim().startsWith("#")) continue;
       const m = LINE.exec(raw);
       if (!m) {
@@ -6275,9 +6402,9 @@ var Graph = class {
     }
   }
   fresh() {
-    const sourceChanged = fs5.existsSync(this.file) && fs5.statSync(this.file).mtimeMs !== this.mtimeMs;
+    const sourceChanged = fs6.existsSync(this.file) && fs6.statSync(this.file).mtimeMs !== this.mtimeMs;
     const overlay = this.overlayFile();
-    const overlayMtime = fs5.existsSync(overlay) ? fs5.statSync(overlay).mtimeMs : 0;
+    const overlayMtime = fs6.existsSync(overlay) ? fs6.statSync(overlay).mtimeMs : 0;
     if (sourceChanged || overlayMtime !== this.overlayMtimeMs) this.load();
   }
   types(s) {
@@ -6421,15 +6548,15 @@ function resolvePred(pred) {
   return pred.includes("://") ? pred : NS + pred;
 }
 function endsWithNewline(file) {
-  const fd = fs5.openSync(file, "r");
+  const fd = fs6.openSync(file, "r");
   try {
-    const size = fs5.fstatSync(fd).size;
+    const size = fs6.fstatSync(fd).size;
     if (size === 0) return true;
     const b = Buffer.alloc(1);
-    fs5.readSync(fd, b, 0, 1, size - 1);
+    fs6.readSync(fd, b, 0, 1, size - 1);
     return b[0] === 10;
   } finally {
-    fs5.closeSync(fd);
+    fs6.closeSync(fd);
   }
 }
 function appendQuads(g, lines) {
@@ -6437,11 +6564,11 @@ function appendQuads(g, lines) {
     if (!LINE.test(l)) throw new Error(`refusing write \u2014 invalid N-Quads line: ${l.slice(0, 120)}`);
   }
   const overlay = g.overlayFile();
-  if (fs5.existsSync(overlay)) {
-    fs5.copyFileSync(overlay, overlay + ".bak");
-    fs5.appendFileSync(overlay, (endsWithNewline(overlay) ? "" : "\n") + lines.join("\n") + "\n");
+  if (fs6.existsSync(overlay)) {
+    fs6.copyFileSync(overlay, overlay + ".bak");
+    fs6.appendFileSync(overlay, (endsWithNewline(overlay) ? "" : "\n") + lines.join("\n") + "\n");
   } else {
-    fs5.writeFileSync(overlay, lines.join("\n") + "\n");
+    fs6.writeFileSync(overlay, lines.join("\n") + "\n");
   }
   g.load();
 }
@@ -6466,7 +6593,7 @@ function graphRemember(g, a) {
   if (a.about) lines.push(quadLine(iri, NS + "about", { iri: mustResolve(g, a.about, "about entity") }));
   for (const l of a.links || []) lines.push(quadLine(iri, NS + "relatesTo", { iri: mustResolve(g, l, "link target") }));
   appendQuads(g, lines);
-  return { status: "remembered", id: localName(iri), class: typed ? a.type : "Note", quads_added: lines.length, graph: path6.basename(g.file) };
+  return { status: "remembered", id: localName(iri), class: typed ? a.type : "Note", quads_added: lines.length, graph: path7.basename(g.file) };
 }
 function graphUpdate(g, a) {
   if (!a.node || !a.predicate) throw new Error("node and predicate are required");
@@ -6476,11 +6603,11 @@ function graphUpdate(g, a) {
   const p = resolvePred(a.predicate);
   if (mode === "restore") {
     const overlay = g.overlayFile();
-    if (!fs5.existsSync(overlay)) return { status: "nothing_to_restore", node: localName(s), predicate: localName(p) };
-    fs5.copyFileSync(overlay, overlay + ".bak");
+    if (!fs6.existsSync(overlay)) return { status: "nothing_to_restore", node: localName(s), predicate: localName(p) };
+    fs6.copyFileSync(overlay, overlay + ".bak");
     let removed = 0;
     const kept = [];
-    for (const raw of fs5.readFileSync(overlay, "utf-8").split("\n")) {
+    for (const raw of fs6.readFileSync(overlay, "utf-8").split("\n")) {
       if (!raw.trim()) continue;
       const m = LINE.exec(raw);
       const isOverrideMarker = m && parseTerm(m[1]).value === s && parseTerm(m[2]).value === OVERRIDES_P && parseTerm(m[3]).value === p;
@@ -6491,10 +6618,10 @@ function graphUpdate(g, a) {
       }
       kept.push(raw);
     }
-    fs5.writeFileSync(overlay + ".tmp", kept.join("\n") + (kept.length ? "\n" : ""));
-    fs5.renameSync(overlay + ".tmp", overlay);
+    fs6.writeFileSync(overlay + ".tmp", kept.join("\n") + (kept.length ? "\n" : ""));
+    fs6.renameSync(overlay + ".tmp", overlay);
     g.load();
-    return { status: "restored", node: localName(s), predicate: localName(p), overlay_lines_removed: removed, graph: path6.basename(g.file) };
+    return { status: "restored", node: localName(s), predicate: localName(p), overlay_lines_removed: removed, graph: path7.basename(g.file) };
   }
   const newLine = quadLine(s, p, { lit: String(a.value) });
   if (!LINE.test(newLine)) throw new Error("refusing write \u2014 invalid N-Quads line");
@@ -6502,10 +6629,10 @@ function graphUpdate(g, a) {
     const marker = `<${s}> <${OVERRIDES_P}> <${p}> <${REMEMBERED_G2}> .`;
     const overlay = g.overlayFile();
     let removed = 0;
-    if (fs5.existsSync(overlay)) {
-      fs5.copyFileSync(overlay, overlay + ".bak");
+    if (fs6.existsSync(overlay)) {
+      fs6.copyFileSync(overlay, overlay + ".bak");
       const kept = [];
-      for (const raw of fs5.readFileSync(overlay, "utf-8").split("\n")) {
+      for (const raw of fs6.readFileSync(overlay, "utf-8").split("\n")) {
         if (!raw.trim()) continue;
         const m = LINE.exec(raw);
         const sameSP = m && parseTerm(m[1]).value === s && (parseTerm(m[2]).value === p || parseTerm(m[2]).value === OVERRIDES_P && parseTerm(m[3]).value === p);
@@ -6516,18 +6643,18 @@ function graphUpdate(g, a) {
         kept.push(raw);
       }
       kept.push(marker, newLine);
-      fs5.writeFileSync(overlay + ".tmp", kept.join("\n") + "\n");
-      fs5.renameSync(overlay + ".tmp", overlay);
+      fs6.writeFileSync(overlay + ".tmp", kept.join("\n") + "\n");
+      fs6.renameSync(overlay + ".tmp", overlay);
       g.load();
     } else {
-      fs5.writeFileSync(overlay, marker + "\n" + newLine + "\n");
+      fs6.writeFileSync(overlay, marker + "\n" + newLine + "\n");
       g.load();
     }
     const masked = (g.spo.get(s) || []).filter((t) => t.p === p).length;
-    return { status: "updated", node: localName(s), predicate: localName(p), mode: "replace (override)", overlay_lines_replaced: removed, values_now: masked, graph: path6.basename(g.file) };
+    return { status: "updated", node: localName(s), predicate: localName(p), mode: "replace (override)", overlay_lines_replaced: removed, values_now: masked, graph: path7.basename(g.file) };
   }
   appendQuads(g, [newLine]);
-  return { status: "updated", node: localName(s), predicate: localName(p), mode, quads_removed: 0, quads_added: 1, graph: path6.basename(g.file) };
+  return { status: "updated", node: localName(s), predicate: localName(p), mode, quads_removed: 0, quads_added: 1, graph: path7.basename(g.file) };
 }
 function graphLink(g, a) {
   if (!a.from || !a.rel || !a.to) throw new Error("from, rel, and to are required");
@@ -6538,15 +6665,15 @@ function graphLink(g, a) {
     return { status: "already_linked", from: localName(s), rel: localName(p), to: localName(t) };
   }
   appendQuads(g, [quadLine(s, p, { iri: t })]);
-  return { status: "linked", from: localName(s), rel: localName(p), to: localName(t), graph: path6.basename(g.file) };
+  return { status: "linked", from: localName(s), rel: localName(p), to: localName(t), graph: path7.basename(g.file) };
 }
 var cache = /* @__PURE__ */ new Map();
 function graphDirs() {
   const env = process.env.GRAPH_DIR;
-  if (env) return env.split(path6.delimiter).filter(Boolean);
-  const dirs = [process.cwd(), path6.join(process.cwd(), "graphs")];
+  if (env) return env.split(path7.delimiter).filter(Boolean);
+  const dirs = [process.cwd(), path7.join(process.cwd(), "graphs")];
   if (hasCredentials()) {
-    dirs.push(path6.join(require("os").homedir(), ".caddy", "graphs"));
+    dirs.push(path7.join(require("os").homedir(), ".caddy", "graphs"));
   }
   return dirs;
 }
@@ -6554,38 +6681,38 @@ function discover() {
   const found = [];
   const seen = /* @__PURE__ */ new Set();
   const scan = (dir) => {
-    if (!fs5.existsSync(dir)) return;
-    for (const f of fs5.readdirSync(dir)) {
+    if (!fs6.existsSync(dir)) return;
+    for (const f of fs6.readdirSync(dir)) {
       if (!f.endsWith(".nq")) continue;
       if (f.endsWith(".local.nq") || /\.v\d+\.nq$/.test(f)) continue;
-      const full = path6.join(dir, f);
+      const full = path7.join(dir, f);
       if (seen.has(full)) continue;
       seen.add(full);
-      const st = fs5.statSync(full);
+      const st = fs6.statSync(full);
       found.push({ name: f, path: full, sizeKB: Math.round(st.size / 1024), modified: st.mtime.toISOString() });
     }
   };
   for (const dir of graphDirs()) {
     scan(dir);
-    scan(path6.join(dir, "graphs"));
-    if (!fs5.existsSync(dir)) continue;
-    for (const sub of fs5.readdirSync(dir)) {
-      const subPath = path6.join(dir, sub);
+    scan(path7.join(dir, "graphs"));
+    if (!fs6.existsSync(dir)) continue;
+    for (const sub of fs6.readdirSync(dir)) {
+      const subPath = path7.join(dir, sub);
       try {
-        if (!fs5.statSync(subPath).isDirectory()) continue;
+        if (!fs6.statSync(subPath).isDirectory()) continue;
       } catch {
         continue;
       }
       scan(subPath);
-      scan(path6.join(subPath, "graphs"));
+      scan(path7.join(subPath, "graphs"));
     }
   }
   return found;
 }
 function graphLabel(g) {
-  let dir = path6.dirname(g.path);
-  if (path6.basename(dir) === "graphs") dir = path6.dirname(dir);
-  return `${path6.basename(dir)}/${g.name}`;
+  let dir = path7.dirname(g.path);
+  if (path7.basename(dir) === "graphs") dir = path7.dirname(dir);
+  return `${path7.basename(dir)}/${g.name}`;
 }
 function getGraph(name) {
   const graphs = discover();
@@ -6616,8 +6743,10 @@ var TOOLS = [
   { name: "graph_update", description: 'Update a property on an existing entity. mode "replace" (default) writes an OVERRIDE into the local overlay: the new value masks every source value of that predicate and keeps winning across graph refreshes until mode "restore" clears it. mode "append" adds another value alongside. mode "restore" removes the override so the source values reappear. The source artifact is never rewritten. Literal values only \u2014 use graph_link for relationships. Resolve the node with graph_search first. Confirm with the user before consequential writes.', inputSchema: { type: "object", properties: { ...GRAPH_ARG, node: { type: "string", description: "Entity id, slug, IRI, or name" }, predicate: { type: "string", description: "Property local name (e.g. description, status, noteText) or full IRI" }, value: { type: "string", description: "Required except for mode restore" }, mode: { type: "string", enum: ["replace", "append", "restore"] } }, required: ["node", "predicate"] } },
   { name: "graph_link", description: "Add a relationship edge between two EXISTING entities (e.g. client \u2192 ownedBy \u2192 person). Both ends must already resolve in the graph; duplicates are refused. Confirm with the user before consequential writes.", inputSchema: { type: "object", properties: { ...GRAPH_ARG, from: { type: "string" }, rel: { type: "string", description: "Relationship local name (e.g. ownedBy, relatesTo, affects) or full IRI" }, to: { type: "string" } }, required: ["from", "rel", "to"] } },
   { name: "graph_pull", description: "Sync an org graph from the connected graph-portal. Version-checked: downloads only when the portal has a newer version than the local copy. Auth comes from the device-login store (run graph_login once per machine); returns auth_required when not connected or credentials were revoked. The portal is PASS-THROUGH (no data at rest): refresh_required means it holds no copy \u2014 run graph_refresh to generate and land a fresh one. Pass project_dir to pull into the Cowork project's graphs/ folder instead of the machine cache. Pass kind for an explicitly shared source graph (e.g. notion) \u2014 not_shared when your seat lacks access. Run at session start or when the graph feels stale.", inputSchema: { type: "object", properties: { force: { type: "boolean", description: "Re-download even when versions match" }, org: { type: "string", description: "Org slug to pull (optional when exactly one org is connected)" }, kind: { type: "string", description: "Graph kind: company (default) or a shared source kind like notion" }, project_dir: { type: "string", description: "Cowork project folder \u2014 the graph lands in <project_dir>/graphs (Windows or WSL path)" } }, required: [] } },
-  { name: "graph_refresh", description: "Generate a FRESH org graph and land it in the project \u2014 the full pass-through cycle: the portal extracts from the org's connected sources (Notion etc.), streams the result here, deletes its copy (no data at rest), and the graph lands in <project_dir>/graphs. Runs for a few minutes in the background \u2014 poll graph_refresh_status. Use when the graph is stale or graph_pull says refresh_required. Requires the graphs.generate capability on your seat; cooldown-limited portal-side.", inputSchema: { type: "object", properties: { org: { type: "string", description: "Org slug (optional when exactly one org is connected)" }, project_dir: { type: "string", description: "Cowork project folder \u2014 the fresh graph lands in <project_dir>/graphs (recommended; omit to use the machine cache)" } }, required: [] } },
+  { name: "graph_refresh", description: "Generate a FRESH COMPANY graph (base.nq \u2014 the org's curated union of connected sources) and land it in the project. OWNER territory: only the org Primary (or a delegated seat) may trigger it; other seats get not_permitted \u2014 they use account_map_refresh for their own maps, and graph_pull to receive the company graph the owner generated. Pass-through: the portal extracts, streams here, and deletes its copy. Runs minutes in the background \u2014 poll graph_refresh_status.", inputSchema: { type: "object", properties: { org: { type: "string", description: "Org slug (optional when exactly one org is connected)" }, project_dir: { type: "string", description: "Cowork project folder \u2014 the fresh graph lands in <project_dir>/graphs (recommended; omit to use the machine cache)" } }, required: [] } },
   { name: "graph_refresh_status", description: "Progress of a graph_refresh: generating (portal extracting) \u2192 downloading \u2192 done (graph in place, with file/version) or failed (with detail).", inputSchema: { type: "object", properties: { org: { type: "string", description: "Org slug (optional when exactly one org is connected)" } }, required: [] } },
+  { name: "account_map_refresh", description: `Generate YOUR personal account map \u2014 the portal extracts with YOUR OWN platform login (connected on the portal's Connections page under "Your account") and lands <provider>-<timestamp>.nq in the project's graphs/ folder. This maps what YOU have access to, separate from the company graph \u2014 optimize at your level for your own work. Any seat may run it. Runs minutes in the background \u2014 poll account_map_status. not_connected means: connect your own account in the portal first.`, inputSchema: { type: "object", properties: { provider: { type: "string", description: "Platform: notion (more connectors as they land)" }, org: { type: "string", description: "Org slug (optional when exactly one org is connected)" }, project_dir: { type: "string", description: "Cowork project folder (recommended; defaults to cwd)" } }, required: ["provider"] } },
+  { name: "account_map_status", description: "Progress of an account_map_refresh: generating \u2192 downloading \u2192 done (file in place) or failed (with detail).", inputSchema: { type: "object", properties: { provider: { type: "string" }, org: { type: "string" } }, required: ["provider"] } },
   { name: "packages_list", description: "List the products/packages this seat is entitled to on the portal, with current version (commit SHA) and local install state. The catalog is entitlement-scoped: only assigned packages appear.", inputSchema: { type: "object", properties: { org: { type: "string", description: "Org slug (optional when exactly one org is connected)" }, project_dir: { type: "string", description: "Cowork project folder (for install-state; defaults to cwd)" } }, required: [] } },
   { name: "package_install", description: "Install or update one entitled package into the Cowork project. The portal streams the content from our private repos server-side \u2014 no GitHub credential ever reaches this machine. Unpacks into <project>/.claude/skills/<slug> (or plugins/<slug> per the product), replacing any prior version; records the installed SHA in .claude/caddy-packages.json. Skips the download when already current (pass force to reinstall).", inputSchema: { type: "object", properties: { product: { type: "string", description: "Product slug from packages_list" }, org: { type: "string" }, project_dir: { type: "string", description: "Cowork project folder (defaults to cwd)" }, target_dir: { type: "string", description: "Override the install location" }, force: { type: "boolean", description: "Reinstall even when current" } }, required: ["product"] } },
   { name: "packages_sync", description: "Make this project match the portal entitlements: install every assigned package that's missing and update every stale one. Reports orphans (installed but no longer entitled) without deleting them. Pass dry_run to see the plan without applying. Run after onboarding or when the team assigns you something new.", inputSchema: { type: "object", properties: { org: { type: "string" }, project_dir: { type: "string", description: "Cowork project folder (defaults to cwd)" }, dry_run: { type: "boolean", description: "Report the plan without installing" } }, required: [] } },
@@ -6629,7 +6758,7 @@ var TOOLS = [
   { name: "generate_notion_status", description: "Check the progress/result of a generate_notion_graph refresh (which runs in the background because a full content pull takes minutes). Returns running / done (with summary) / failed.", inputSchema: { type: "object", properties: { project_dir: { type: "string" } }, required: ["project_dir"] } }
 ];
 async function main() {
-  const server = new Server({ name: "caddy-mcp", version: "0.3.0" }, { capabilities: { tools: {} } });
+  const server = new Server({ name: "caddy-mcp", version: "0.4.0" }, { capabilities: { tools: {} } });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
@@ -6638,8 +6767,8 @@ async function main() {
       let result;
       if (name === "list_graphs") result = { dirs: graphDirs(), graphs: discover().map((g) => {
         const overlay = g.path.replace(/\.nq$/, ".local.nq");
-        const hasOverlay = fs5.existsSync(overlay);
-        return { ...g, label: graphLabel(g), local_overlay: hasOverlay ? { file: path6.basename(overlay), sizeKB: Math.round(fs5.statSync(overlay).size / 1024) } : null };
+        const hasOverlay = fs6.existsSync(overlay);
+        return { ...g, label: graphLabel(g), local_overlay: hasOverlay ? { file: path7.basename(overlay), sizeKB: Math.round(fs6.statSync(overlay).size / 1024) } : null };
       }) };
       else if (name === "graph_schema") result = getGraph(a.graph).schema();
       else if (name === "graph_search") result = getGraph(a.graph).search(a.query, a.limit || 20, a.type);
@@ -6648,9 +6777,11 @@ async function main() {
       else if (name === "graph_remember") result = graphRemember(getGraph(a.graph), a);
       else if (name === "graph_update") result = graphUpdate(getGraph(a.graph), a);
       else if (name === "graph_link") result = graphLink(getGraph(a.graph), a);
-      else if (name === "graph_pull") result = await remotePull(!!a.force, a.org, a.kind, a.project_dir ? path6.join(toWslPath(a.project_dir), "graphs") : void 0);
+      else if (name === "graph_pull") result = await remotePull(!!a.force, a.org, a.kind, a.project_dir ? path7.join(toWslPath(a.project_dir), "graphs") : void 0);
       else if (name === "graph_refresh") result = await graphRefresh(a);
       else if (name === "graph_refresh_status") result = graphRefreshStatus(a);
+      else if (name === "account_map_refresh") result = await accountMapRefresh(a);
+      else if (name === "account_map_status") result = accountMapStatus(a);
       else if (name === "packages_list") result = await packagesList(a);
       else if (name === "package_install") result = await packageInstall(a);
       else if (name === "packages_sync") result = await packagesSync(a);
