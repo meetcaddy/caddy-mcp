@@ -1,0 +1,16 @@
+{
+  "name": "caddy-mcp",
+  "version": "0.4.1",
+  "description": "Caddy graph MCP — portal login, org knowledge graphs, account maps, and packages",
+  "author": {
+    "name": "Meet Caddy",
+    "url": "https://github.com/meetcaddy"
+  },
+  "repository": "https://github.com/meetcaddy/caddy-mcp",
+  "mcpServers": {
+    "caddy": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/caddy-mcp.cjs"]
+    }
+  }
+}

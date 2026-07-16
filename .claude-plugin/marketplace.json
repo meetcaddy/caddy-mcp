@@ -1,0 +1,22 @@
+{
+  "name": "caddy",
+  "owner": {
+    "name": "Meet Caddy",
+    "url": "https://github.com/meetcaddy"
+  },
+  "metadata": {
+    "description": "Meet Caddy plugin marketplace",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "caddy-mcp",
+      "source": "./",
+      "description": "Caddy graph MCP — portal login, org knowledge graphs, account maps, and packages",
+      "version": "0.4.1",
+      "author": {
+        "name": "Meet Caddy"
+      }
+    }
+  ]
+}
