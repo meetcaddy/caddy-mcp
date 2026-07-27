@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "caddy-mcp",
   "display_name": "Caddy",
-  "version": "0.4.8",
+  "version": "0.4.9",
   "description": "Your company's knowledge graph, answerable inside Claude. Portal login, graph delivery and refresh, live knowledge writes, account maps, and packages.",
   "long_description": "Caddy connects Claude to your organization's own knowledge graph. Log in once with a device code, pull the company graph your team's Caddy portal generated, and every answer is grounded in your business's actual data, on your machine. Graph data stays local: the portal streams it here and keeps no copy. Includes live knowledge writes with provenance, per-platform account maps, Notion workspace graphs, and one-click install of the packages your seat is entitled to.",
   "author": {
@@ -20,35 +20,112 @@
     "entry_point": "caddy-mcp.cjs",
     "mcp_config": {
       "command": "node",
-      "args": ["${__dirname}/caddy-mcp.cjs"]
+      "args": [
+        "${__dirname}/caddy-mcp.cjs"
+      ]
     }
   },
   "compatibility": {
-    "platforms": ["win32", "darwin"]
+    "platforms": [
+      "win32",
+      "darwin"
+    ]
   },
   "tools": [
-    { "name": "list_graphs", "description": "List the knowledge graph files available to query, with size and role" },
-    { "name": "graph_schema", "description": "Profile a graph: entity classes with counts, top predicates, named graphs" },
-    { "name": "graph_search", "description": "Text search over the graph's labels, names, and summaries" },
-    { "name": "graph_neighbors", "description": "Traverse from an entity to everything it connects to, with relationship names" },
-    { "name": "graph_node", "description": "Full record of one entity: properties, text, source, incoming links" },
-    { "name": "graph_remember", "description": "Add new knowledge to a graph so it appreciates over time" },
-    { "name": "graph_update", "description": "Update a property on an existing entity" },
-    { "name": "graph_link", "description": "Add a relationship edge between two existing entities" },
-    { "name": "graph_login", "description": "Connect this machine to the graph portal via device-code login" },
-    { "name": "graph_auth_status", "description": "Check whether a pending login has been approved" },
-    { "name": "graph_pull", "description": "Sync an org graph from the connected graph portal" },
-    { "name": "graph_refresh", "description": "Generate a fresh company graph from connected sources" },
-    { "name": "graph_refresh_status", "description": "Progress of a company graph refresh" },
-    { "name": "account_map_refresh", "description": "Generate a single-platform account map graph for a project" },
-    { "name": "account_map_status", "description": "Progress of an account map refresh" },
-    { "name": "packages_list", "description": "List the packages this seat is entitled to on the portal" },
-    { "name": "package_install", "description": "Install or update one entitled package into the project" },
-    { "name": "packages_sync", "description": "Match the project to portal entitlements" },
-    { "name": "notion_authorize", "description": "Start a one-time Notion OAuth authorization for a project" },
-    { "name": "notion_auth_status", "description": "Check whether a pending Notion authorization has completed" },
-    { "name": "generate_notion_graph", "description": "Generate or refresh a Notion workspace graph locally" },
-    { "name": "generate_notion_status", "description": "Check progress of a Notion graph refresh" }
+    {
+      "name": "list_graphs",
+      "description": "List the knowledge graph files available to query, with size and role"
+    },
+    {
+      "name": "graph_schema",
+      "description": "Profile a graph: entity classes with counts, top predicates, named graphs"
+    },
+    {
+      "name": "graph_search",
+      "description": "Text search over the graph's labels, names, and summaries"
+    },
+    {
+      "name": "graph_neighbors",
+      "description": "Traverse from an entity to everything it connects to, with relationship names"
+    },
+    {
+      "name": "graph_node",
+      "description": "Full record of one entity: properties, text, source, incoming links"
+    },
+    {
+      "name": "graph_remember",
+      "description": "Add new knowledge to a graph so it appreciates over time"
+    },
+    {
+      "name": "graph_update",
+      "description": "Update a property on an existing entity"
+    },
+    {
+      "name": "graph_link",
+      "description": "Add a relationship edge between two existing entities"
+    },
+    {
+      "name": "graph_login",
+      "description": "Connect this machine to the graph portal via device-code login"
+    },
+    {
+      "name": "graph_auth_status",
+      "description": "Check whether a pending login has been approved"
+    },
+    {
+      "name": "graph_pull",
+      "description": "Sync an org graph from the connected graph portal"
+    },
+    {
+      "name": "graph_refresh",
+      "description": "Generate a fresh company graph from connected sources"
+    },
+    {
+      "name": "graph_refresh_status",
+      "description": "Progress of a company graph refresh"
+    },
+    {
+      "name": "account_map_refresh",
+      "description": "Generate a single-platform account map graph for a project"
+    },
+    {
+      "name": "account_map_status",
+      "description": "Progress of an account map refresh"
+    },
+    {
+      "name": "packages_list",
+      "description": "List the packages this seat is entitled to on the portal"
+    },
+    {
+      "name": "package_install",
+      "description": "Install or update one entitled package into the project"
+    },
+    {
+      "name": "packages_sync",
+      "description": "Match the project to portal entitlements"
+    },
+    {
+      "name": "notion_authorize",
+      "description": "Start a one-time Notion OAuth authorization for a project"
+    },
+    {
+      "name": "notion_auth_status",
+      "description": "Check whether a pending Notion authorization has completed"
+    },
+    {
+      "name": "generate_notion_graph",
+      "description": "Generate or refresh a Notion workspace graph locally"
+    },
+    {
+      "name": "generate_notion_status",
+      "description": "Check progress of a Notion graph refresh"
+    }
   ],
-  "keywords": ["knowledge-graph", "company-context", "cowork", "caddy", "onboarding"]
+  "keywords": [
+    "knowledge-graph",
+    "company-context",
+    "cowork",
+    "caddy",
+    "onboarding"
+  ]
 }
