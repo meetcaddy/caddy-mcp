@@ -1,0 +1,4 @@
+# Keep the bundle to exactly what the server needs at runtime.
+dist/
+.claude-plugin/
+.mcpbignore

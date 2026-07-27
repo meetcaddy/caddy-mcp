@@ -1,6 +1,6 @@
 {
   "name": "caddy-mcp",
-  "version": "0.4.7",
+  "version": "0.4.8",
   "description": "Caddy graph MCP — portal login, org knowledge graphs, account maps, and packages",
   "author": {
     "name": "Meet Caddy",
